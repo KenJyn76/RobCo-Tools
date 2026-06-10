@@ -294,10 +294,13 @@ begin
 
   gCobjPatchFilterByCobjs := RobCoPatchFilterFormIDRef(e);
   gCobjPatchFilterByCategoryKeywordsOr := RobCoNoneIfEmpty(categoryKeywords);
-  gCobjPatchCategoryKeywordsToAdd := RobCoExportListFieldIfChanged(e,
-    RobCoNoneIfEmpty(categoryKeywords), RobCoNoneIfEmpty(masterCategory));
+  RobCoApplyRefListDiffIfCompact(e, RobCoNoneIfEmpty(categoryKeywords),
+    RobCoNoneIfEmpty(masterCategory), gCobjPatchCategoryKeywordsToAdd,
+    gCobjPatchCategoryKeywordsToRemove);
   if gCobjPatchCategoryKeywordsToAdd = '' then
     gCobjPatchCategoryKeywordsToAdd := 'none';
+  if gCobjPatchCategoryKeywordsToRemove = '' then
+    gCobjPatchCategoryKeywordsToRemove := 'none';
   gCobjPatchWorkbenchKeyword := RobCoExportFieldIfChanged(e, workbench, masterWorkbench);
 
   if ElementExists(e, 'BNAM') then begin
@@ -313,9 +316,10 @@ end;
 function BuildRobCoCOBJLine: string;
 begin
   Result := '';
+  // RobCo Patcher COBJ filters are independent (OR across types), not ANDed.
+  // Per-record snapshot export must use filterByCobjs only; secondary filters
+  // would apply operations to unrelated constructible objects and can crash.
   Result := RobCoAppendPatchField(Result, 'filterByCobjs', gCobjPatchFilterByCobjs);
-  Result := RobCoAppendPatchField(Result, 'filterByWorkbenchKeywordsOr', gCobjPatchFilterByWorkbenchKeywordsOr);
-  Result := RobCoAppendPatchField(Result, 'filterByCategoryKeywordsOr', gCobjPatchFilterByCategoryKeywordsOr);
 
   Result := RobCoAppendField(Result, 'categoryKeywordsToAdd', gCobjPatchCategoryKeywordsToAdd, True);
   Result := RobCoAppendField(Result, 'categoryKeywordsToRemove', gCobjPatchCategoryKeywordsToRemove, True);

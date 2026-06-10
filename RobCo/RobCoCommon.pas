@@ -26,6 +26,7 @@ var
   gRobCoIniCombinedFileStarted: boolean;
   gRobCoIniNeedCombinedPluginHeader: boolean;
   gRobCoIniPluginsStarted: TStringList;
+  gRobCoIniOverwriteOnFlush: boolean;
 
 const
   RobCoFilterLLs = 'filterByLLs=';
@@ -1034,7 +1035,7 @@ begin
   if gRobCoIniActivePath = '' then
     Exit;
   try
-    if FileExists(gRobCoIniActivePath) then begin
+    if (not gRobCoIniOverwriteOnFlush) and FileExists(gRobCoIniActivePath) then begin
       merged := TStringList.Create;
       try
         merged.LoadFromFile(gRobCoIniActivePath);
@@ -1045,6 +1046,7 @@ begin
       end;
     end else
       gRobCoIniLineBuffer.SaveToFile(gRobCoIniActivePath);
+    gRobCoIniOverwriteOnFlush := False;
     gRobCoIniLineBuffer.Clear;
   except
     AddMessage('Error flushing INI: ' + gRobCoIniActivePath);
@@ -1067,6 +1069,7 @@ begin
   RobCoIniWriterFlushBuffer;
   gRobCoIniActivePath := path;
   gRobCoIniFileActive := True;
+  gRobCoIniOverwriteOnFlush := countAsNewFile;
   if countAsNewFile then begin
     Inc(gRobCoIniFilesCreated);
     AddMessage('Created INI: ' + path);
