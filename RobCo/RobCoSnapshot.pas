@@ -2113,6 +2113,74 @@ end;
 
 //============================================================================
 
+function NpcStripRankSuffixFromRefList(const listText: string): string;
+
+var
+
+  parsed, outParts: TStringList;
+
+  i, eqPos: integer;
+
+  entry, refKey: string;
+
+begin
+
+  Result := listText;
+
+  if (listText = '') or (listText = 'none') then
+
+    Exit;
+
+
+
+  parsed := TStringList.Create;
+
+  outParts := TStringList.Create;
+
+  try
+
+    RobCoParseCommaList(parsed, listText);
+
+    for i := 0 to Pred(parsed.Count) do begin
+
+      entry := Trim(parsed[i]);
+
+      if entry = '' then
+
+        Continue;
+
+      eqPos := Pos('=', entry);
+
+      if eqPos > 0 then
+
+        refKey := Copy(entry, 1, eqPos - 1)
+
+      else
+
+        refKey := entry;
+
+      if outParts.IndexOf(refKey) < 0 then
+
+        outParts.Add(refKey);
+
+    end;
+
+    Result := RobCoNoneIfEmpty(RobCoJoinParts(outParts));
+
+  finally
+
+    outParts.Free;
+
+    parsed.Free;
+
+  end;
+
+end;
+
+
+
+//============================================================================
+
 procedure InitRobCoNPCPatchData;
 
 begin
@@ -2287,9 +2355,9 @@ begin
 
   RobCoApplyRefListDiffIfCompact(e, inventory, masterInventory, gNpcPatchObjectsToAdd, objectsRem);
 
-  gNpcPatchFactionsToRemove := factionsRem;
+  gNpcPatchFactionsToRemove := NpcStripRankSuffixFromRefList(factionsRem);
 
-  gNpcPatchObjectsToRemove := objectsRem;
+  gNpcPatchObjectsToRemove := NpcStripRankSuffixFromRefList(objectsRem);
 
 
 
