@@ -23,6 +23,8 @@ var
   gRobCoDlgGbExportOptions: TGroupBox;
   gRobCoDlgGbRecordOperation: TGroupBox;
   gRobCoDlgGbOutput: TGroupBox;
+  gRobCoDlgPnlOutputLayout: TPanel;
+  gRobCoDlgPnlOutputBaseline: TPanel;
   gRobCoDlgChkOverridesOnly: TCheckBox;
   gRobCoDlgChkForwardItms: TCheckBox;
   gRobCoDlgChkWriteAllFields: TCheckBox;
@@ -30,6 +32,8 @@ var
   gRobCoDlgChkListRemove: TCheckBox;
   gRobCoDlgRbOutputPerPlugin: TRadioButton;
   gRobCoDlgRbOutputCombined: TRadioButton;
+  gRobCoDlgRbCompareLoadOrder: TRadioButton;
+  gRobCoDlgRbComparePluginAccuracy: TRadioButton;
   gRobCoDlgBtnOk: TButton;
   gRobCoDlgBtnCancel: TButton;
   gRobCoDlgBtnSelectAll: TButton;
@@ -146,6 +150,8 @@ begin
   gRobCoDlgGbExportOptions := nil;
   gRobCoDlgGbRecordOperation := nil;
   gRobCoDlgGbOutput := nil;
+  gRobCoDlgPnlOutputLayout := nil;
+  gRobCoDlgPnlOutputBaseline := nil;
   gRobCoDlgChkOverridesOnly := nil;
   gRobCoDlgChkForwardItms := nil;
   gRobCoDlgChkWriteAllFields := nil;
@@ -153,6 +159,8 @@ begin
   gRobCoDlgChkListRemove := nil;
   gRobCoDlgRbOutputPerPlugin := nil;
   gRobCoDlgRbOutputCombined := nil;
+  gRobCoDlgRbCompareLoadOrder := nil;
+  gRobCoDlgRbComparePluginAccuracy := nil;
   gRobCoDlgBtnOk := nil;
   gRobCoDlgBtnCancel := nil;
   gRobCoDlgBtnSelectAll := nil;
@@ -168,6 +176,8 @@ begin
   gRobCoDlgGbExportOptions := TGroupBox(frm.FindComponent('gbExportOptions'));
   gRobCoDlgGbRecordOperation := TGroupBox(frm.FindComponent('gbRecordOperation'));
   gRobCoDlgGbOutput := TGroupBox(frm.FindComponent('gbOutput'));
+  gRobCoDlgPnlOutputLayout := TPanel(frm.FindComponent('pnlOutputLayout'));
+  gRobCoDlgPnlOutputBaseline := TPanel(frm.FindComponent('pnlOutputBaseline'));
   gRobCoDlgChkOverridesOnly := TCheckBox(frm.FindComponent('chkOverridesOnly'));
   gRobCoDlgChkForwardItms := TCheckBox(frm.FindComponent('chkForwardItms'));
   gRobCoDlgChkWriteAllFields := TCheckBox(frm.FindComponent('chkWriteAllFields'));
@@ -175,6 +185,8 @@ begin
   gRobCoDlgChkListRemove := TCheckBox(frm.FindComponent('chkListRemove'));
   gRobCoDlgRbOutputPerPlugin := TRadioButton(frm.FindComponent('rbOutputPerPlugin'));
   gRobCoDlgRbOutputCombined := TRadioButton(frm.FindComponent('rbOutputCombined'));
+  gRobCoDlgRbCompareLoadOrder := TRadioButton(frm.FindComponent('rbCompareLoadOrder'));
+  gRobCoDlgRbComparePluginAccuracy := TRadioButton(frm.FindComponent('rbComparePluginAccuracy'));
   gRobCoDlgBtnOk := TButton(frm.FindComponent('btnOk'));
   gRobCoDlgBtnCancel := TButton(frm.FindComponent('btnCancel'));
   gRobCoDlgBtnSelectAll := TButton(frm.FindComponent('btnSelectAll'));
@@ -258,8 +270,90 @@ begin
     gRobCoDlgRbOutputPerPlugin.Hint := 'Example: MyMod\' + RobCoPatcherFrameworkRoot +
       '<category>\MyMod.esp.ini (one file per type under each category folder)';
     gRobCoDlgRbOutputCombined.Hint := 'Example: MyMod\' + RobCoPatcherFrameworkRoot +
-      '<category>\<type> Export.ini (one file per selected type)';
+      '<category>\RobCo Tools.ini (one file per selected type)';
   end;
+end;
+
+//============================================================================
+function RobCoCombinedOutputAllowed(hasSnapshotType: boolean): boolean;
+begin
+  Result := False;
+  if not Assigned(gRobCoDlgChkForwardItms) then
+    Exit;
+  if gRobCoDlgChkForwardItms.Checked then
+    Exit;
+  Result := True;
+end;
+
+//============================================================================
+procedure RobCoRefreshCombinedOutputAvailability(frm: TForm;
+  hasSnapshotType, hintOp: integer);
+var
+  disabledHint: string;
+begin
+  if not Assigned(gRobCoDlgRbOutputCombined) then
+    Exit;
+  if RobCoCombinedOutputAllowed(hasSnapshotType) then begin
+    gRobCoDlgRbOutputCombined.Enabled := True;
+    RobCoUpdateOutputHints(frm, hintOp);
+    Exit;
+  end;
+  disabledHint := 'Combined output requires Forward ITMs off.';
+  gRobCoDlgRbOutputCombined.Hint := disabledHint;
+  gRobCoDlgRbOutputCombined.Enabled := False;
+  if gRobCoDlgRbOutputCombined.Checked then begin
+    if Assigned(gRobCoDlgRbOutputPerPlugin) then
+      gRobCoDlgRbOutputPerPlugin.Checked := True;
+  end;
+end;
+
+//============================================================================
+procedure RobCoRefreshForwardItmsAvailability(frm: TForm);
+begin
+  if not Assigned(gRobCoDlgChkForwardItms) then
+    Exit;
+  if Assigned(gRobCoDlgRbOutputCombined) then begin
+    if gRobCoDlgRbOutputCombined.Checked then begin
+      gRobCoDlgChkForwardItms.Checked := False;
+      gRobCoDlgChkForwardItms.Enabled := False;
+      gRobCoDlgChkForwardItms.Hint :=
+        'Forward ITMs is not available with Combined output (use Per plugin). ' +
+        'ITM carry-forward increases combined dedupe load.';
+      Exit;
+    end;
+  end;
+  gRobCoDlgChkForwardItms.Enabled := True;
+  gRobCoDlgChkForwardItms.Hint :=
+    'When off, skip unchanged (ITM) records vs master. When on, emit master-matched content.';
+end;
+
+//============================================================================
+procedure RobCoExportOptionsChanged(Sender: TObject);
+var
+  frm: TForm;
+  hasListType, hasSnapshotType: boolean;
+  hintOp: integer;
+begin
+  frm := TForm(TCheckBox(Sender).Parent.Parent);
+  RobCoComputeDialogSelection(frm, hasListType, hasSnapshotType, hintOp);
+  RobCoRefreshCombinedOutputAvailability(frm, hasSnapshotType, hintOp);
+  RobCoRefreshForwardItmsAvailability(frm);
+end;
+
+//============================================================================
+procedure RobCoOutputFormatChanged(Sender: TObject);
+var
+  frm: TForm;
+  hasListType, hasSnapshotType: boolean;
+  hintOp: integer;
+begin
+  if Assigned(gRobCoDlgGbOutput) then
+    frm := TForm(gRobCoDlgGbOutput.Parent)
+  else
+    frm := TForm(TRadioButton(Sender).Parent.Parent);
+  RobCoComputeDialogSelection(frm, hasListType, hasSnapshotType, hintOp);
+  RobCoRefreshCombinedOutputAvailability(frm, hasSnapshotType, hintOp);
+  RobCoRefreshForwardItmsAvailability(frm);
 end;
 
 //============================================================================
@@ -316,15 +410,36 @@ begin
   RobCoSetGroupBoxItemStack(gRobCoDlgGbOutput, 2);
   startTop := RobCoGroupBoxStartTop(gRobCoDlgGbOutput, 2);
   innerWidth := RobCoGroupBoxInnerWidth(gRobCoDlgGbOutput);
-  gRobCoDlgRbOutputPerPlugin.Left := 12;
-  gRobCoDlgRbOutputPerPlugin.Top := startTop;
-  gRobCoDlgRbOutputPerPlugin.Width := innerWidth;
+  if Assigned(gRobCoDlgPnlOutputLayout) then begin
+    gRobCoDlgPnlOutputLayout.Left := 12;
+    gRobCoDlgPnlOutputLayout.Top := startTop;
+    gRobCoDlgPnlOutputLayout.Width := (innerWidth - 8) div 2;
+    gRobCoDlgPnlOutputLayout.Height := 40;
+  end;
+  if Assigned(gRobCoDlgPnlOutputBaseline) then begin
+    gRobCoDlgPnlOutputBaseline.Left := 12 + gRobCoDlgPnlOutputLayout.Width + 8;
+    gRobCoDlgPnlOutputBaseline.Top := startTop;
+    gRobCoDlgPnlOutputBaseline.Width := (innerWidth - 8) div 2;
+    gRobCoDlgPnlOutputBaseline.Height := 40;
+  end;
+  gRobCoDlgRbOutputPerPlugin.Left := 0;
+  gRobCoDlgRbOutputPerPlugin.Top := 0;
+  gRobCoDlgRbOutputPerPlugin.Width := gRobCoDlgPnlOutputLayout.Width;
   gRobCoDlgRbOutputPerPlugin.ShowHint := True;
-  gRobCoDlgRbOutputCombined.Left := 12;
-  gRobCoDlgRbOutputCombined.Top := startTop + 23;
-  gRobCoDlgRbOutputCombined.Width := innerWidth;
+  gRobCoDlgRbOutputCombined.Left := 0;
+  gRobCoDlgRbOutputCombined.Top := 23;
+  gRobCoDlgRbOutputCombined.Width := gRobCoDlgPnlOutputLayout.Width;
   gRobCoDlgRbOutputCombined.ShowHint := True;
-  RobCoUpdateOutputHints(frm, hintOp);
+  gRobCoDlgRbCompareLoadOrder.Left := 0;
+  gRobCoDlgRbCompareLoadOrder.Top := 0;
+  gRobCoDlgRbCompareLoadOrder.Width := gRobCoDlgPnlOutputBaseline.Width;
+  gRobCoDlgRbCompareLoadOrder.ShowHint := True;
+  gRobCoDlgRbComparePluginAccuracy.Left := 0;
+  gRobCoDlgRbComparePluginAccuracy.Top := 23;
+  gRobCoDlgRbComparePluginAccuracy.Width := gRobCoDlgPnlOutputBaseline.Width;
+  gRobCoDlgRbComparePluginAccuracy.ShowHint := True;
+  RobCoRefreshCombinedOutputAvailability(frm, hasSnapshotType, hintOp);
+  RobCoRefreshForwardItmsAvailability(frm);
   topOffset := gRobCoDlgGbOutput.Top + gRobCoDlgGbOutput.Height + 8;
   gRobCoDlgBtnOk.Top := topOffset + 8;
   gRobCoDlgBtnCancel.Top := topOffset + 8;
@@ -345,27 +460,26 @@ begin
   while True do begin
     gRobCoDlgRefreshPending := False;
     gRobCoDlgRefreshDepth := 1;
-    try
-      RobCoComputeDialogSelection(frm, hasListType, hasSnapshotType, hintOp);
-      needFullLayout := not gRobCoDlgLayoutReady;
-      if not needFullLayout then begin
-        if hasListType <> gRobCoDlgCachedHasList then
-          needFullLayout := True
-        else if hasSnapshotType <> gRobCoDlgCachedHasSnapshot then
-          needFullLayout := True;
-      end;
-      if needFullLayout then
-        RobCoLayoutToolsDialog(frm, hasListType, hasSnapshotType, hintOp)
-      else if hintOp <> gRobCoDlgCachedHintOp then
-        RobCoUpdateOutputHints(frm, hintOp);
-      RobCoComputeDialogSelection(frm, hasListType, hasSnapshotType, hintOp);
-      gRobCoDlgCachedHasList := hasListType;
-      gRobCoDlgCachedHasSnapshot := hasSnapshotType;
-      gRobCoDlgCachedHintOp := hintOp;
-      gRobCoDlgLayoutReady := True;
-    finally
-      gRobCoDlgRefreshDepth := 0;
+    RobCoComputeDialogSelection(frm, hasListType, hasSnapshotType, hintOp);
+    needFullLayout := not gRobCoDlgLayoutReady;
+    if not needFullLayout then begin
+      if hasListType <> gRobCoDlgCachedHasList then
+        needFullLayout := True
+      else if hasSnapshotType <> gRobCoDlgCachedHasSnapshot then
+        needFullLayout := True;
     end;
+    if needFullLayout then
+      RobCoLayoutToolsDialog(frm, hasListType, hasSnapshotType, hintOp)
+    else if hintOp <> gRobCoDlgCachedHintOp then
+      RobCoUpdateOutputHints(frm, hintOp);
+    RobCoComputeDialogSelection(frm, hasListType, hasSnapshotType, hintOp);
+    RobCoRefreshCombinedOutputAvailability(frm, hasSnapshotType, hintOp);
+    RobCoRefreshForwardItmsAvailability(frm);
+    gRobCoDlgCachedHasList := hasListType;
+    gRobCoDlgCachedHasSnapshot := hasSnapshotType;
+    gRobCoDlgCachedHintOp := hintOp;
+    gRobCoDlgLayoutReady := True;
+    gRobCoDlgRefreshDepth := 0;
     if not gRobCoDlgRefreshPending then
       Break;
   end;
@@ -415,30 +529,31 @@ end;
 
 //============================================================================
 procedure RobCoToolsOkClick(Sender: TObject);
-var
-  frm: TForm;
-  clbOperation: TCheckListBox;
-  chkListAdd, chkListRemove: TCheckBox;
 begin
-  frm := TForm(TButton(Sender).Parent);
-  clbOperation := TCheckListBox(frm.FindComponent('clbOperation'));
-  RobCoCollectSelectedOps(clbOperation, robCoOpMap, gRobCoSelectedOps);
+  RobCoCollectSelectedOps(gRobCoDlgClbOperation, robCoOpMap, gRobCoSelectedOps);
   if gRobCoSelectedOps.Count = 0 then begin
     MessageDlg('Select at least one record type.', mtWarning, [mbOk], 0);
     Exit;
   end;
   if RobCoSelectionHasListType(gRobCoSelectedOps) then begin
-    chkListAdd := TCheckBox(frm.FindComponent('chkListAdd'));
-    chkListRemove := TCheckBox(frm.FindComponent('chkListRemove'));
-    if not chkListAdd.Checked then begin
-      if not chkListRemove.Checked then begin
+    if not gRobCoDlgChkListAdd.Checked then begin
+      if not gRobCoDlgChkListRemove.Checked then begin
         MessageDlg('Select at least one of Add entries or Remove dropped entries.',
           mtWarning, [mbOk], 0);
         Exit;
       end;
     end;
   end;
-  frm.ModalResult := mrOk;
+  if Assigned(gRobCoDlgRbOutputCombined) then begin
+    if gRobCoDlgRbOutputCombined.Checked then begin
+      if not RobCoCombinedOutputAllowed(RobCoSelectionHasSnapshotType(gRobCoSelectedOps)) then begin
+        MessageDlg('Combined output requires Forward ITMs off.',
+          mtWarning, [mbOk], 0);
+        Exit;
+      end;
+    end;
+  end;
+  TForm(TButton(Sender).Parent).ModalResult := mrOk;
 end;
 
 //============================================================================
@@ -447,15 +562,17 @@ var
   frm: TForm;
   clbOperation: TCheckListBox;
   gbRecordTypes, gbExportOptions, gbRecordOperation, gbOutput: TGroupBox;
-  chkListAdd, chkListRemove, chkForwardItms, chkOverridesOnly, chkWriteAllFields: TCheckBox;
+  pnlOutputLayout, pnlOutputBaseline: TPanel;
+  chkListAdd, chkListRemove, chkForwardItms, chkOverridesOnly,
+  chkWriteAllFields: TCheckBox;
   rbOutputPerPlugin, rbOutputCombined: TRadioButton;
+  rbCompareLoadOrder, rbComparePluginAccuracy: TRadioButton;
   btnOk, btnCancel, btnSelectAll, btnSelectNone, btnInvert: TButton;
 begin
   Result := False;
   robCoOpMap := TStringList.Create;
   frm := TForm.Create(nil);
-  try
-    frm.Caption := 'RobCo Tools';
+  frm.Caption := 'RobCo Tools';
     frm.Width := 360;
     frm.Position := poScreenCenter;
     frm.BorderStyle := bsDialog;
@@ -524,6 +641,7 @@ begin
     chkForwardItms.ShowHint := True;
     chkForwardItms.Hint :=
       'Emit ITM and master-matched content instead of skipping it.';
+    chkForwardItms.OnClick := RobCoExportOptionsChanged;
 
     chkWriteAllFields := TCheckBox.Create(frm);
     chkWriteAllFields.Parent := gbExportOptions;
@@ -533,9 +651,10 @@ begin
     chkWriteAllFields.Checked := False;
     chkWriteAllFields.ShowHint := True;
     chkWriteAllFields.Hint :=
-      'Snapshot exports only. On: print every filter and operation field (including ' +
-      'unchanged and none) so you can delete what you do not need when authoring a ' +
-      'custom patch. Off (default): only changed operation fields when Forward ITMs is also off.';
+      'Snapshot exports only. On: append every article filter slot and operation field ' +
+      'unchanged slots as =none so you can trim when authoring a batch patch. Does not ' +
+      'change override selection or ITM skip logic. Off (default): sparse mirror lines only.';
+    chkWriteAllFields.OnClick := RobCoExportOptionsChanged;
 
     chkListAdd := TCheckBox.Create(frm);
     chkListAdd.Parent := gbRecordOperation;
@@ -560,21 +679,56 @@ begin
     gbOutput := TGroupBox.Create(frm);
     gbOutput.Parent := frm;
     gbOutput.Name := 'gbOutput';
-    gbOutput.Caption := 'Output format';
+    gbOutput.Caption := 'Output mode';
     gbOutput.Width := gbRecordTypes.Width;
 
+    pnlOutputLayout := TPanel.Create(frm);
+    pnlOutputLayout.Parent := gbOutput;
+    pnlOutputLayout.Name := 'pnlOutputLayout';
+    pnlOutputLayout.BevelOuter := bvNone;
+    pnlOutputLayout.Caption := '';
+
+    pnlOutputBaseline := TPanel.Create(frm);
+    pnlOutputBaseline.Parent := gbOutput;
+    pnlOutputBaseline.Name := 'pnlOutputBaseline';
+    pnlOutputBaseline.BevelOuter := bvNone;
+    pnlOutputBaseline.Caption := '';
+
     rbOutputPerPlugin := TRadioButton.Create(frm);
-    rbOutputPerPlugin.Parent := gbOutput;
+    rbOutputPerPlugin.Parent := pnlOutputLayout;
     rbOutputPerPlugin.Name := 'rbOutputPerPlugin';
     rbOutputPerPlugin.Height := 17;
     rbOutputPerPlugin.Caption := 'Per plugin';
     rbOutputPerPlugin.Checked := True;
+    rbOutputPerPlugin.OnClick := RobCoOutputFormatChanged;
 
     rbOutputCombined := TRadioButton.Create(frm);
-    rbOutputCombined.Parent := gbOutput;
+    rbOutputCombined.Parent := pnlOutputLayout;
     rbOutputCombined.Name := 'rbOutputCombined';
     rbOutputCombined.Height := 17;
     rbOutputCombined.Caption := 'Combined';
+    rbOutputCombined.OnClick := RobCoOutputFormatChanged;
+
+    rbCompareLoadOrder := TRadioButton.Create(frm);
+    rbCompareLoadOrder.Parent := pnlOutputBaseline;
+    rbCompareLoadOrder.Name := 'rbCompareLoadOrder';
+    rbCompareLoadOrder.Height := 17;
+    rbCompareLoadOrder.Caption := 'Load order parity';
+    rbCompareLoadOrder.Checked := True;
+    rbCompareLoadOrder.ShowHint := True;
+    rbCompareLoadOrder.Hint :=
+      'Diff overrides vs the immediate load-order parent (MasterOrSelf). Default.';
+
+    rbComparePluginAccuracy := TRadioButton.Create(frm);
+    rbComparePluginAccuracy.Parent := pnlOutputBaseline;
+    rbComparePluginAccuracy.Name := 'rbComparePluginAccuracy';
+    rbComparePluginAccuracy.Height := 17;
+    rbComparePluginAccuracy.Caption := 'Plugin accuracy';
+    rbComparePluginAccuracy.ShowHint := True;
+    rbComparePluginAccuracy.Hint :=
+      'Diff overrides vs the virtual load order from this plugin and its transitive ESP ' +
+      'Master Files. Undeclared plugins between your mod and its masters are skipped. ' +
+      'Does not change patcher filterBy* form refs.';
 
     btnOk := TButton.Create(frm);
     btnOk.Parent := frm;
@@ -600,20 +754,24 @@ begin
     if frm.ShowModal = mrOk then begin
       gRobCoListExportAdd := chkListAdd.Checked;
       gRobCoListExportRemove := chkListRemove.Checked;
-      gRobCoExportForwardItms := chkForwardItms.Checked;
       gRobCoPerPlugin := rbOutputPerPlugin.Checked;
       gRobCoOverridesOnly := chkOverridesOnly.Checked;
+      gRobCoCompareDeclaredMasters := rbComparePluginAccuracy.Checked;
       gRobCoExportWriteAllFields := chkWriteAllFields.Checked;
       if not RobCoSelectionHasSnapshotType(gRobCoSelectedOps) then
         gRobCoExportWriteAllFields := False;
+      if gRobCoPerPlugin then
+        gRobCoExportForwardItms := chkForwardItms.Checked
+      else begin
+        gRobCoExportForwardItms := False;
+      end;
       Result := True;
     end;
-  finally
-    RobCoClearDialogControls;
-    robCoOpMap.Free;
-    robCoOpMap := nil;
-    frm.Free;
-  end;
+
+  RobCoClearDialogControls;
+  robCoOpMap.Free;
+  robCoOpMap := nil;
+  frm.Free;
 end;
 
 end.

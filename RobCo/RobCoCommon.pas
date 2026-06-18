@@ -7,13 +7,16 @@ var
   slRobCoExportLog: TStringList;
   gRobCoExportWriteAllFields: boolean;
   gRobCoExportForwardItms: boolean;
+  gRobCoSnapItmGateActive: boolean;
   gRobCoListExportAdd: boolean;
   gRobCoListExportRemove: boolean;
   gRobCoPerPlugin: boolean;
   gRobCoOverridesOnly: boolean;
+  gRobCoCompareDeclaredMasters: boolean;
   gRobCoSelectedOps: TStringList;
   gRobCoPatcherOutputDir: string;
   gRobCoPatcherDirBare: string;
+  gRobCoPatcherRootDirBare: string;
   gRobCoIniWriterActive: boolean;
   gRobCoIniOutputDir: string;
   gRobCoIniPerPlugin: boolean;
@@ -28,7 +31,42 @@ var
   gRobCoIniPluginsStarted: TStringList;
   gRobCoIniOverwriteOnFlush: boolean;
 
+  gRobCoKeywordPartsScratch: TStringList;
+  gRobCoDiffScratchPlugin: TStringList;
+  gRobCoDiffScratchMaster: TStringList;
+  gRobCoDiffScratchAdd: TStringList;
+  gRobCoDiffScratchRem: TStringList;
+  gRobCoIniDedupeSeenScratch: TStringList;
+  gRobCoIniDedupeOutputScratch: TStringList;
+  gRobCoIniMergeScratch: TStringList;
+  gRobCoIniDeferredAggregate: TStringList;
+  gRobCoPluginNameByLoadOrder: TStringList;
+
+  gRobCoSnapMasterCacheKeys: TStringList;
+  gRobCoSnapMasterCacheVals: TStringList;
+  gRobCoSnapRecordCacheKeys: TStringList;
+  gRobCoSnapRecordCacheVals: TStringList;
+  gRobCoSnapConflictProbeKeys: TStringList;
+
+  gRobCoProgressLastReportMs: integer;
+  gRobCoProgressPluginTotal: integer;
+  gRobCoProgressOpNum: integer;
+  gRobCoProgressOpTotal: integer;
+  gRobCoProgressOpLabel: string;
+
+{ DEBUG_INJECT_SYNC_GLOBALS: debug injection site — sync-profile splices stat globals (profile_markers.json) }
+// DEBUG_INJECT_SYNC_GLOBALS
+
+  gRobCoPluginGroupCache: TStringList;
+  gRobCoIniCachedPerPluginName: string;
+  gRobCoIniCachedPerPluginPath: string;
+  gRobCoIniCachedCombinedPath: string;
+  gRobCoExportRunId: string;
+  gRobCoReliedPluginsByFile: TStringList;
+  gRobCoGameMasterFileName: string;
+
 const
+  RobCoProgressMinIntervalMs = 30000;
   RobCoFilterLLs = 'filterByLLs=';
   RobCoFilterCONT = 'filterByContainers=';
   RobCoFilterNpcs = 'filterByNpcs=';
@@ -55,6 +93,119 @@ const
     ',falloutnv.esm,deadmoney.esm,honesthearts.esm,oldworldblues.esm,lonesomeroad.esm,' +
     'gunrunnersarsenal.esm,classicpack.esm,mercenarypack.esm,tribalpack.esm,';
 
+  RobCoIniDeferredPathMarker = '//@@ROBCO_DEFERRED_PATH:';
+  { Peak line buffer before chunk flush — same ceiling as load-order catalog exporter (~327680 lines).
+    Catalog OOM at FlushLineCount=0 held ~1.55M Fallout4.esm lines; combined INI must not grow unbounded. }
+  RobCoIniFlushLineCount = 327680;
+  RobCoIniDeferAggregateFlushLineCount = 327680;
+  RobCoIniDeferDiskFlush = True;
+
+//============================================================================
+function RobCoNowMs: integer;
+begin
+  Result := Trunc(Now * 86400000);
+end;
+
+
+//============================================================================
+procedure RobCoProgressReset;
+begin
+  gRobCoProgressLastReportMs := 0;
+  gRobCoProgressPluginTotal := 0;
+  gRobCoProgressOpNum := 0;
+  gRobCoProgressOpTotal := 0;
+  gRobCoProgressOpLabel := '';
+end;
+
+
+//============================================================================
+procedure RobCoProgressSetPluginTotal(totalPlugins: integer);
+begin
+  gRobCoProgressPluginTotal := totalPlugins;
+end;
+
+
+//============================================================================
+procedure RobCoProgressSetOp(opNum, opTotal: integer; const opLabel: string);
+begin
+  gRobCoProgressOpNum := opNum;
+  gRobCoProgressOpTotal := opTotal;
+  gRobCoProgressOpLabel := opLabel;
+end;
+
+
+//============================================================================
+procedure RobCoReportProgress(const msg: string);
+var
+  nowMs: integer;
+begin
+  nowMs := RobCoNowMs;
+  if gRobCoProgressLastReportMs > 0 then begin
+    if (nowMs - gRobCoProgressLastReportMs) < RobCoProgressMinIntervalMs then
+      Exit;
+  end;
+  gRobCoProgressLastReportMs := nowMs;
+  AddMessage(msg);
+end;
+
+//============================================================================
+// Always prints; updates last-write time (Started/Stopped record-type lines only).
+procedure RobCoReportProgressOpBoundary(const msg: string);
+begin
+  gRobCoProgressLastReportMs := RobCoNowMs;
+  AddMessage(msg);
+end;
+
+
+//============================================================================
+procedure RobCoProgressReportPlugin(const pluginName: string; pluginIndex: integer);
+var
+  msg: string;
+begin
+  if gRobCoProgressOpLabel = '' then
+    Exit;
+  msg := 'RobCo [' + IntToStr(gRobCoProgressOpNum) + '/' +
+    IntToStr(gRobCoProgressOpTotal) + '] ' + gRobCoProgressOpLabel +
+    ': plugin ' + IntToStr(pluginIndex + 1) + '/' +
+    IntToStr(gRobCoProgressPluginTotal) + ' ' + pluginName;
+  RobCoReportProgress(msg);
+end;
+
+{ DEBUG_INJECT_SYNC_PROCS: debug injection site — sync-profile splices debug/perfmon procedures until function RobCoJsonEscape }
+// DEBUG_INJECT_SYNC_PROCS
+//============================================================================
+procedure RobCoLogSkippedDuplicate(const msg: string);
+begin
+  RobCoQueueExportLog(msg);
+end;
+
+//============================================================================
+function RobCoJsonEscape(const s: string): string;
+var
+  i: integer;
+  ch: string;
+begin
+  Result := '';
+  for i := 1 to Length(s) do begin
+    ch := Copy(s, i, 1);
+    if ch = '\' then
+      Result := Result + '\\'
+    else if ch = '"' then
+      Result := Result + '\"'
+    else
+      Result := Result + ch;
+  end;
+end;
+
+//============================================================================
+function RobCoJsonBool(flag: boolean): string;
+begin
+  if flag then
+    Result := 'true'
+  else
+    Result := 'false';
+end;
+
 //============================================================================
 function FormatFormID(e: IInterface): string;
 var
@@ -77,9 +228,74 @@ begin
 end;
 
 //============================================================================
+procedure RobCoEnsurePluginNameCache;
+begin
+  if not Assigned(gRobCoPluginNameByLoadOrder) then
+    gRobCoPluginNameByLoadOrder := TStringList.Create;
+end;
+
+//============================================================================
+procedure RobCoBuildPluginNameCache;
+var
+  i, lo, maxLo: integer;
+  f: IInterface;
+begin
+  RobCoEnsurePluginNameCache;
+  gRobCoPluginNameByLoadOrder.Clear;
+  maxLo := 0;
+  for i := 0 to Pred(FileCount) do begin
+    f := FileByIndex(i);
+    if not Assigned(f) then
+      Continue;
+    lo := GetLoadOrder(f);
+    if lo > maxLo then
+      maxLo := lo;
+  end;
+  while gRobCoPluginNameByLoadOrder.Count <= maxLo do
+    gRobCoPluginNameByLoadOrder.Add('');
+  for i := 0 to Pred(FileCount) do begin
+    f := FileByIndex(i);
+    if not Assigned(f) then
+      Continue;
+    lo := GetLoadOrder(f);
+    gRobCoPluginNameByLoadOrder[lo] := GetFileName(f);
+  end;
+end;
+
+//============================================================================
+function RobCoPluginNameForFile(af: IInterface): string;
+var
+  lo: integer;
+begin
+  Result := '';
+  if not Assigned(af) then
+    Exit;
+  lo := GetLoadOrder(af);
+  if Assigned(gRobCoPluginNameByLoadOrder) then begin
+    if lo >= 0 then begin
+      if lo < gRobCoPluginNameByLoadOrder.Count then begin
+        Result := gRobCoPluginNameByLoadOrder[lo];
+        if Result <> '' then
+          Exit;
+      end;
+    end;
+  end;
+  Result := GetFileName(af);
+end;
+
+//============================================================================
+function RobCoPluginNameForRecord(e: IInterface): string;
+begin
+  Result := '';
+  if not Assigned(e) then
+    Exit;
+  Result := RobCoPluginNameForFile(GetFile(e));
+end;
+
+//============================================================================
 function FormIDRef(rec: IInterface): string;
 begin
-  Result := GetFileName(GetFile(rec)) + '|' + FormatFormID(rec);
+  Result := RobCoPluginNameForRecord(rec) + '|' + FormatFormID(rec);
 end;
 
 //============================================================================
@@ -107,16 +323,212 @@ function RobCoRecordUnchangedVsMaster(e: IInterface): boolean;
 var
   master: IInterface;
 begin
-  if not Assigned(e) or IsMaster(e) then begin
+  if not Assigned(e) then begin
     Result := False;
     Exit;
   end;
-  master := MasterOrSelf(e);
+  if IsMaster(e) then begin
+    Result := False;
+    Exit;
+  end;
+  master := RobCoCompareBaselineRecord(e);
   if not Assigned(master) then begin
     Result := False;
     Exit;
   end;
   Result := ConflictAllForElements(e, master, False, False) <= caNoConflict;
+end;
+
+//============================================================================
+function RobCoSubElementConflictFree(a, b: IInterface): boolean;
+var
+  countA, countB: integer;
+begin
+  if not Assigned(a) then begin
+    if not Assigned(b) then
+      Result := True
+    else
+      Result := False;
+    Exit;
+  end;
+  if not Assigned(b) then begin
+    Result := False;
+    Exit;
+  end;
+  countA := ElementCount(a);
+  countB := ElementCount(b);
+  if countA = 0 then begin
+    if countB = 0 then
+      Result := True
+    else
+      Result := False;
+    Exit;
+  end;
+  Result := ConflictAllForElements(a, b, False, False) <= caNoConflict;
+end;
+
+//============================================================================
+// Key must include the override's own identity (FormIDRef(e)) so that different
+// plugins overriding the same master weapon/NPC do not share cache entries.
+// Using RobCoPatchFilterFormIDRef(e) = FormIDRef(MasterOrSelf(e)) collapses all
+// overrides of the same master to the same key, causing stale conflictFree=True
+// hits that silently suppress keyword/subgraph changes in later override plugins.
+function RobCoSnapConflictProbeCacheKey(e, master: IInterface; const tag: string): string;
+begin
+  Result := FormIDRef(e) + #1 + RobCoPatchFilterFormIDRef(master) + #1 + tag;
+end;
+
+//============================================================================
+procedure RobCoSnapEnsureConflictProbeCache;
+begin
+  if not Assigned(gRobCoSnapConflictProbeKeys) then begin
+    gRobCoSnapConflictProbeKeys := TStringList.Create;
+    gRobCoSnapConflictProbeKeys.Sorted := True;
+    gRobCoSnapConflictProbeKeys.Duplicates := dupIgnore;
+  end;
+end;
+
+//============================================================================
+function RobCoSnapConflictProbeCacheTryGet(const key: string; var conflictFree: boolean): boolean;
+var
+  idx: integer;
+begin
+  Result := False;
+  if not Assigned(gRobCoSnapConflictProbeKeys) then begin
+    // DEBUG_INJECT_PERFMON_COUNTER count.conflict.probe.cache.miss 1
+    Exit;
+  end;
+  idx := gRobCoSnapConflictProbeKeys.IndexOf(key);
+  if idx < 0 then begin
+    // DEBUG_INJECT_PERFMON_COUNTER count.conflict.probe.cache.miss 1
+    Exit;
+  end;
+  conflictFree := Integer(gRobCoSnapConflictProbeKeys.Objects[idx]) <> 0;
+  // DEBUG_INJECT_PERFMON_COUNTER count.conflict.probe.cache.hit 1
+  Result := True;
+end;
+
+//============================================================================
+procedure RobCoSnapConflictProbeCachePut(const key: string; conflictFree: boolean);
+var
+  idx: integer;
+  flag: integer;
+begin
+  RobCoSnapEnsureConflictProbeCache;
+  if conflictFree then
+    flag := 1
+  else
+    flag := 0;
+  idx := gRobCoSnapConflictProbeKeys.IndexOf(key);
+  if idx >= 0 then
+    gRobCoSnapConflictProbeKeys.Objects[idx] := TObject(flag)
+  else
+    gRobCoSnapConflictProbeKeys.AddObject(key, TObject(flag));
+end;
+
+//============================================================================
+function RobCoSubElementConflictFreeByPath(e, master: IInterface; const path: string): boolean;
+var
+  a, b: IInterface;
+  key: string;
+begin
+  key := RobCoSnapConflictProbeCacheKey(e, master, 'p:' + path);
+  if RobCoSnapConflictProbeCacheTryGet(key, Result) then
+    Exit;
+  if not ElementExists(e, path) then begin
+    if not ElementExists(master, path) then
+      Result := True
+    else
+      Result := False;
+    RobCoSnapConflictProbeCachePut(key, Result);
+    Exit;
+  end;
+  if not ElementExists(master, path) then begin
+    Result := False;
+    RobCoSnapConflictProbeCachePut(key, Result);
+    Exit;
+  end;
+  a := ElementByPath(e, path);
+  b := ElementByPath(master, path);
+  Result := RobCoSubElementConflictFree(a, b);
+  RobCoSnapConflictProbeCachePut(key, Result);
+end;
+
+//============================================================================
+function RobCoSubElementConflictFreeByName(e, master: IInterface; const name: string): boolean;
+var
+  a, b: IInterface;
+  key: string;
+begin
+  key := RobCoSnapConflictProbeCacheKey(e, master, 'n:' + name);
+  if RobCoSnapConflictProbeCacheTryGet(key, Result) then
+    Exit;
+  if not ElementExists(e, name) then begin
+    if not ElementExists(master, name) then
+      Result := True
+    else
+      Result := False;
+    RobCoSnapConflictProbeCachePut(key, Result);
+    Exit;
+  end;
+  if not ElementExists(master, name) then begin
+    Result := False;
+    RobCoSnapConflictProbeCachePut(key, Result);
+    Exit;
+  end;
+  a := ElementByName(e, name);
+  b := ElementByName(master, name);
+  Result := RobCoSubElementConflictFree(a, b);
+  RobCoSnapConflictProbeCachePut(key, Result);
+end;
+
+//============================================================================
+function RobCoSubElementConflictFreeBySignature(e, master: IInterface; const sig: string): boolean;
+var
+  a, b: IInterface;
+  key: string;
+begin
+  key := RobCoSnapConflictProbeCacheKey(e, master, 's:' + sig);
+  if RobCoSnapConflictProbeCacheTryGet(key, Result) then
+    Exit;
+  a := ElementBySignature(e, sig);
+  b := ElementBySignature(master, sig);
+  if not Assigned(a) then begin
+    if not Assigned(b) then
+      Result := True
+    else
+      Result := False;
+    RobCoSnapConflictProbeCachePut(key, Result);
+    Exit;
+  end;
+  if not Assigned(b) then begin
+    Result := False;
+    RobCoSnapConflictProbeCachePut(key, Result);
+    Exit;
+  end;
+  Result := RobCoSubElementConflictFree(a, b);
+  RobCoSnapConflictProbeCachePut(key, Result);
+end;
+
+//============================================================================
+function RobCoEditScalarConflictFree(e, master: IInterface; const path: string): boolean;
+var
+  ve, vm: string;
+begin
+  if not ElementExists(e, path) then begin
+    if not ElementExists(master, path) then
+      Result := True
+    else
+      Result := False;
+    Exit;
+  end;
+  if not ElementExists(master, path) then begin
+    Result := False;
+    Exit;
+  end;
+  ve := GetElementEditValues(e, path);
+  vm := GetElementEditValues(master, path);
+  Result := ve = vm;
 end;
 
 //============================================================================
@@ -131,6 +543,190 @@ begin
 end;
 
 //============================================================================
+function RobCoFileByPluginName(const pluginName: string): IInterface;
+var
+  i: integer;
+  f: IInterface;
+begin
+  Result := nil;
+  if pluginName = '' then
+    Exit;
+  for i := 0 to Pred(FileCount) do begin
+    f := FileByIndex(i);
+    if not Assigned(f) then
+      Continue;
+    if SameText(GetFileName(f), pluginName) then begin
+      Result := f;
+      Exit;
+    end;
+  end;
+end;
+
+//============================================================================
+function RobCoReliedPluginSetHas(relied: TStringList; const pluginNameLower: string): boolean;
+var
+  i: integer;
+begin
+  Result := False;
+  if not Assigned(relied) then
+    Exit;
+  if pluginNameLower = '' then
+    Exit;
+  for i := 0 to Pred(relied.Count) do begin
+    if SameText(relied[i], pluginNameLower) then begin
+      Result := True;
+      Exit;
+    end;
+  end;
+end;
+
+//============================================================================
+procedure RobCoReliedPluginSetAdd(relied: TStringList; const pluginNameLower: string);
+begin
+  if not Assigned(relied) then
+    Exit;
+  if pluginNameLower = '' then
+    Exit;
+  if RobCoReliedPluginSetHas(relied, pluginNameLower) then
+    Exit;
+  relied.Add(pluginNameLower);
+end;
+
+//============================================================================
+procedure RobCoReliedPluginsAppendDirectMasters(af: IInterface; relied, queue: TStringList);
+var
+  masters, ent: IInterface;
+  i: integer;
+  mastName, mastLower: string;
+begin
+  if not Assigned(af) then
+    Exit;
+  if not Assigned(relied) then
+    Exit;
+  if not Assigned(queue) then
+    Exit;
+  if ElementCount(af) <= 0 then
+    Exit;
+  masters := ElementByName(ElementByIndex(af, 0), 'Master Files');
+  if not Assigned(masters) then
+    Exit;
+  for i := 0 to Pred(ElementCount(masters)) do begin
+    ent := ElementByIndex(masters, i);
+    mastName := Trim(GetElementEditValues(ent, 'MAST'));
+    if mastName = '' then
+      Continue;
+    mastLower := LowerCase(mastName);
+    RobCoReliedPluginSetAdd(relied, mastLower);
+    if not RobCoReliedPluginSetHas(queue, mastLower) then
+      queue.Add(mastLower);
+  end;
+end;
+
+//============================================================================
+function RobCoReliedPluginsForFile(af: IInterface): TStringList;
+var
+  cacheKey, gameLower, queueName: string;
+  cacheIdx, i: integer;
+  relied, queue: TStringList;
+  nextFile: IInterface;
+begin
+  Result := nil;
+  if not Assigned(af) then
+    Exit;
+  if not Assigned(gRobCoReliedPluginsByFile) then
+    gRobCoReliedPluginsByFile := TStringList.Create;
+  cacheKey := LowerCase(GetFileName(af));
+  cacheIdx := gRobCoReliedPluginsByFile.IndexOf(cacheKey);
+  if cacheIdx >= 0 then begin
+    Result := TStringList(gRobCoReliedPluginsByFile.Objects[cacheIdx]);
+    Exit;
+  end;
+
+  relied := TStringList.Create;
+  queue := TStringList.Create;
+  gameLower := LowerCase(gRobCoGameMasterFileName);
+  if gameLower <> '' then
+    RobCoReliedPluginSetAdd(relied, gameLower);
+  RobCoReliedPluginsAppendDirectMasters(af, relied, queue);
+
+  i := 0;
+  while i < queue.Count do begin
+    queueName := queue[i];
+    nextFile := RobCoFileByPluginName(queueName);
+    if Assigned(nextFile) then begin
+      if gRobCoGameMasterFileName = '' then
+        RobCoReliedPluginsAppendDirectMasters(nextFile, relied, queue)
+      else if not SameText(GetFileName(nextFile), gRobCoGameMasterFileName) then
+        RobCoReliedPluginsAppendDirectMasters(nextFile, relied, queue);
+    end;
+    i := i + 1;
+  end;
+
+  queue.Free;
+  gRobCoReliedPluginsByFile.AddObject(cacheKey, relied);
+  Result := relied;
+end;
+
+//============================================================================
+procedure RobCoReliedPluginsCacheReset;
+var
+  i: integer;
+begin
+  if Assigned(gRobCoReliedPluginsByFile) then begin
+    for i := 0 to Pred(gRobCoReliedPluginsByFile.Count) do begin
+      if Assigned(gRobCoReliedPluginsByFile.Objects[i]) then
+        TStringList(gRobCoReliedPluginsByFile.Objects[i]).Free;
+    end;
+    gRobCoReliedPluginsByFile.Clear;
+  end;
+  gRobCoGameMasterFileName := '';
+  if FileCount > 0 then begin
+    if Assigned(FileByIndex(0)) then
+      gRobCoGameMasterFileName := GetFileName(FileByIndex(0));
+  end;
+end;
+
+//============================================================================
+function RobCoCompareBaselineRecord(e: IInterface): IInterface;
+var
+  ownerFile, walk: IInterface;
+  relied: TStringList;
+  ownerNameLower: string;
+begin
+  Result := nil;
+  if not Assigned(e) then
+    Exit;
+  if not gRobCoCompareDeclaredMasters then begin
+    Result := MasterOrSelf(e);
+    Exit;
+  end;
+  if IsMaster(e) then begin
+    Result := e;
+    Exit;
+  end;
+  ownerFile := GetFile(e);
+  if not Assigned(ownerFile) then begin
+    Result := MasterOrSelf(e);
+    Exit;
+  end;
+  relied := RobCoReliedPluginsForFile(ownerFile);
+  walk := Master(e);
+  while Assigned(walk) do begin
+    ownerNameLower := LowerCase(GetFileName(GetFile(walk)));
+    if RobCoReliedPluginSetHas(relied, ownerNameLower) then begin
+      Result := walk;
+      Exit;
+    end;
+    if IsMaster(walk) then begin
+      Result := walk;
+      Exit;
+    end;
+    walk := Master(walk);
+  end;
+  Result := walk;
+end;
+
+//============================================================================
 function RobCoShouldExportRecord(e: IInterface; overridesOnly: boolean): boolean;
 begin
   if not overridesOnly then
@@ -140,6 +736,9 @@ begin
 end;
 
 //============================================================================
+// Record gate only: overridesOnly + Forward ITMs (ITM skip). Write all fields
+// must never be read here — it affects line verbosity only (RobCoAppendField /
+// RobCoAppendNumericField for scalar ops).
 function RobCoShouldProcessOverride(e: IInterface; forwardItms, overridesOnly: boolean): boolean;
 begin
   Result := False;
@@ -147,17 +746,151 @@ begin
     Exit;
   if not RobCoShouldExportRecord(e, overridesOnly) then
     Exit;
-  if (not forwardItms) and RobCoRecordUnchangedVsMaster(e) then
+  if forwardItms then begin
+    Result := True;
+    Exit;
+  end;
+  if overridesOnly then begin
+    // Record-level ConflictAll is too coarse for LVLI-style subgraph edits and many
+    // snapshot field diffs; Export* routines apply fine-grained ITM gates.
+    Result := True;
+    Exit;
+  end;
+  if RobCoRecordUnchangedVsMaster(e) then
     Exit;
   Result := True;
 end;
 
 //============================================================================
+function RobCoItmGateExternalOverride(e: IInterface): boolean;
+begin
+  Result := False;
+  if not RobCoSnapshotUseItmGate then
+    Exit;
+  if not RobCoRecordHasExternalMaster(e) then
+    Exit;
+  Result := True;
+end;
+
+//============================================================================
+function RobCoScalarUnchangedVsMaster(const pluginVal, masterVal: string): boolean;
+begin
+  Result := pluginVal = masterVal;
+end;
+
+//============================================================================
+function RobCoCommaListRefCount(const listText: string): integer;
+begin
+  Result := 0;
+  if listText = '' then
+    Exit;
+  RobCoEnsureDiffScratch;
+  RobCoParseCommaList(gRobCoDiffScratchPlugin, listText);
+  Result := gRobCoDiffScratchPlugin.Count;
+end;
+
+//============================================================================
+function RobCoRefListDiffUnchangedVsMaster(const pluginList, masterList: string): boolean;
+var
+  refsToAdd, refsToRemove: string;
+begin
+  RobCoDiffCommaSeparatedRefs(pluginList, masterList, refsToAdd, refsToRemove);
+  Result := True;
+  if (refsToAdd <> '') then begin
+    if refsToAdd <> 'none' then begin
+      Result := False;
+      Exit;
+    end;
+  end;
+  if (refsToRemove <> '') then begin
+    if refsToRemove <> 'none' then begin
+      Result := False;
+      Exit;
+    end;
+  end;
+end;
+
+//============================================================================
+function RobCoRefListDiffUnchangedFromLists(slPlugin, slMaster: TStringList): boolean;
+var
+  i: integer;
+  ref: string;
+begin
+  Result := True;
+  if not Assigned(slPlugin) then
+    Exit;
+  if not Assigned(slMaster) then
+    Exit;
+  RobCoEnsureDiffScratch;
+  gRobCoDiffScratchMaster.Clear;
+  for i := 0 to Pred(slMaster.Count) do
+    gRobCoDiffScratchMaster.Add(slMaster[i]);
+  gRobCoDiffScratchMaster.Sorted := True;
+
+  for i := 0 to Pred(slPlugin.Count) do begin
+    ref := Trim(slPlugin[i]);
+    if ref = '' then
+      Continue;
+    if gRobCoDiffScratchMaster.IndexOf(ref) < 0 then begin
+      Result := False;
+      Exit;
+    end;
+  end;
+
+  gRobCoDiffScratchPlugin.Clear;
+  for i := 0 to Pred(slPlugin.Count) do
+    gRobCoDiffScratchPlugin.Add(slPlugin[i]);
+  gRobCoDiffScratchPlugin.Sorted := True;
+  for i := 0 to Pred(slMaster.Count) do begin
+    ref := Trim(slMaster[i]);
+    if ref = '' then
+      Continue;
+    if gRobCoDiffScratchPlugin.IndexOf(ref) < 0 then begin
+      Result := False;
+      Exit;
+    end;
+  end;
+  gRobCoDiffScratchPlugin.Sorted := False;
+  gRobCoDiffScratchMaster.Sorted := False;
+end;
+
+//============================================================================
+function RobCoKeywordRefsUnchangedVsMaster(e: IInterface): boolean;
+var
+  master: IInterface;
+  pluginKw, masterKw: string;
+begin
+  Result := False;
+  if not RobCoRecordHasExternalMaster(e) then
+    Exit;
+  master := RobCoCompareBaselineRecord(e);
+  pluginKw := RobCoReadKeywordRefsFromElement(e);
+  masterKw := RobCoReadKeywordRefsFromElement(master);
+  Result := RobCoRefListDiffUnchangedVsMaster(pluginKw, masterKw);
+end;
+
+//============================================================================
+function RobCoListFieldUnchangedVsMaster(e: IInterface; const pluginList, masterList: string): boolean;
+begin
+  Result := False;
+  if not RobCoRecordHasExternalMaster(e) then
+    Exit;
+  Result := RobCoRefListDiffUnchangedVsMaster(pluginList, masterList);
+end;
+
+//============================================================================
 procedure RobCoBeginExport;
 begin
+  RobCoProgressReset;
+  // DEBUG_INJECT_PERFMON_HOOK stat_reset_begin_export
+  RobCoReliedPluginsCacheReset;
+  RobCoPluginGroupCacheReset;
   if Assigned(slRobCoExportLog) then
     slRobCoExportLog.Free;
   slRobCoExportLog := nil;
+  gRobCoExportRunId := IntToStr(RobCoNowMs);
+  gRobCoPatcherRootDirBare := '';
+  RobCoBuildPluginNameCache;
   RobCoIniWriterInit;
 end;
 
@@ -170,10 +903,90 @@ begin
 end;
 
 //============================================================================
+function RobCoPluginGroupHasOverrides(grp: IInterface): boolean;
+var
+  j: integer;
+  e: IInterface;
+begin
+  Result := False;
+  if not Assigned(grp) then
+    Exit;
+  for j := 0 to Pred(ElementCount(grp)) do begin
+    e := ElementByIndex(grp, j);
+    if RobCoRecordHasExternalMaster(e) then begin
+      Result := True;
+      Exit;
+    end;
+  end;
+end;
+
+//============================================================================
+procedure RobCoPluginGroupCacheReset;
+begin
+  if Assigned(gRobCoPluginGroupCache) then begin
+    gRobCoPluginGroupCache.Free;
+    gRobCoPluginGroupCache := nil;
+  end;
+end;
+
+//============================================================================
+procedure RobCoPluginGroupCacheEnsure;
+begin
+  if not Assigned(gRobCoPluginGroupCache) then begin
+    gRobCoPluginGroupCache := TStringList.Create;
+    gRobCoPluginGroupCache.Sorted := True;
+    gRobCoPluginGroupCache.Duplicates := dupIgnore;
+  end;
+end;
+
+//============================================================================
+function RobCoPluginGroupHasOverridesCachedGrp(f: IInterface; const sig: string;
+  grp: IInterface): boolean;
+var
+  pluginName, cacheKey: string;
+  idx: integer;
+begin
+  Result := False;
+  if not Assigned(f) then
+    Exit;
+  if sig = '' then
+    Exit;
+  if not Assigned(grp) then
+    Exit;
+  RobCoPluginGroupCacheEnsure;
+  pluginName := GetFileName(f);
+  cacheKey := pluginName + #1 + sig;
+  idx := gRobCoPluginGroupCache.IndexOf(cacheKey);
+  if idx >= 0 then begin
+    // DEBUG_INJECT_PERFMON_COUNTER count.cache.plugin.group.hit 1
+    Result := Integer(gRobCoPluginGroupCache.Objects[idx]) <> 0;
+    Exit;
+  end;
+  // DEBUG_INJECT_PERFMON_COUNTER count.cache.plugin.group.miss 1
+  Result := RobCoPluginGroupHasOverrides(grp);
+  gRobCoPluginGroupCache.AddObject(cacheKey, TObject(Integer(Result)));
+end;
+
+//============================================================================
+function RobCoPluginGroupHasOverridesCached(f: IInterface; const sig: string): boolean;
+var
+  grp: IInterface;
+begin
+  Result := False;
+  if not Assigned(f) then
+    Exit;
+  if sig = '' then
+    Exit;
+  grp := GroupBySignature(f, sig);
+  Result := RobCoPluginGroupHasOverridesCachedGrp(f, sig, grp);
+end;
+
+//============================================================================
 procedure RobCoFlushExportLog;
 var
   i: integer;
 begin
+  // DEBUG_INJECT_PERFMON_HOOK stat_summary_flush_export_log
   if Assigned(slRobCoExportLog) then begin
     for i := 0 to Pred(slRobCoExportLog.Count) do
       AddMessage(slRobCoExportLog[i]);
@@ -181,44 +994,28 @@ begin
     slRobCoExportLog := nil;
   end;
 
+  // DEBUG_INJECT_PERFMON_HOOK manifest_write_flush_export_log
   RobCoIniWriterShutdown;
 end;
-
 //============================================================================
-procedure RobCoLogSkippedDuplicate(const msg: string);
-begin
-  AddMessage(msg);
-end;
-
-//============================================================================
+// Caller must run RobCoShouldProcessOverride before gather/build.
 procedure RobCoEmitSnapshotRecord(e: IInterface; const sig: string;
-  forwardItms, overridesOnly, shortComment: boolean; const line: string);
+  shortComment: boolean; const line: string);
 var
-  pluginName, editorID, msgLabel: string;
+  pluginName, editorID: string;
 begin
-  if not RobCoShouldProcessOverride(e, forwardItms, overridesOnly) then
-    Exit;
-
   if not RobCoSnapshotLineHasOperations(line) then
     Exit;
 
   if not gRobCoIniWriterActive then
     Exit;
 
-  pluginName := GetFileName(GetFile(e));
+  pluginName := RobCoPluginNameForRecord(e);
   editorID := RobCoEditorID(e);
 
   RobCoIniWriterWriteRecordBlock(pluginName,
     RobCoRecordComment(editorID, pluginName, sig, e, shortComment), line);
-
-  if sig = 'NPC_' then
-    msgLabel := 'NPC'
-  else
-    msgLabel := sig;
-
-  AddMessage(Format('Processed ' + msgLabel + ': %s [%s|' + sig + ':%s]', [
-    editorID, pluginName, FormatFormID(e)
-  ]));
+  // DEBUG_INJECT_PERFMON_COUNTER count.snapshot.emitted 1
 end;
 
 //============================================================================
@@ -282,30 +1079,123 @@ begin
 end;
 
 //============================================================================
-procedure RobCoMultisetInc(sl: TStringList; const key: string);
+procedure RobCoMultisetClear(sl: TStringList);
+begin
+  if not Assigned(sl) then
+    Exit;
+  sl.Clear;
+  sl.Sorted := False;
+end;
+
+//============================================================================
+function RobCoStringListItemAt(sl: TStringList; index: integer): string;
+begin
+  Result := '';
+  if index < 0 then
+    Exit;
+  if not Assigned(sl) then
+    Exit;
+  if index >= sl.Count then
+    Exit;
+  Result := sl[index];
+end;
+
+//============================================================================
+function RobCoStringListObjectIntAt(sl: TStringList; index: integer): integer;
+begin
+  Result := 0;
+  if index < 0 then
+    Exit;
+  if not Assigned(sl) then
+    Exit;
+  if index >= sl.Count then
+    Exit;
+  Result := Integer(sl.Objects[index]);
+end;
+
+//============================================================================
+function RobCoLoopLastIndex(count: integer): integer;
+begin
+  Result := -1;
+  if count <= 0 then
+    Exit;
+  Result := Pred(count);
+end;
+
+//============================================================================
+function RobCoMultisetFindIdxLinear(sl: TStringList; const key: string): integer;
+var
+  i, loopLast: integer;
+begin
+  Result := -1;
+  if not Assigned(sl) then
+    Exit;
+  if key = '' then
+    Exit;
+  loopLast := RobCoLoopLastIndex(sl.Count);
+  if loopLast < 0 then
+    Exit;
+  for i := 0 to loopLast do begin
+    if CompareStr(RobCoStringListItemAt(sl, i), key) = 0 then begin
+      Result := i;
+      Exit;
+    end;
+  end;
+end;
+
+//============================================================================
+function RobCoMultisetFindIdx(sl: TStringList; const key: string): integer;
+begin
+  Result := RobCoMultisetFindIdxLinear(sl, key);
+end;
+
+//============================================================================
+procedure RobCoMultisetAddCount(sl: TStringList; const key: string; count: integer);
 var
   idx, n: integer;
 begin
   if key = '' then
     Exit;
+  if count <= 0 then
+    Exit;
 
-  idx := sl.IndexOf(key);
+  idx := RobCoMultisetFindIdxLinear(sl, key);
   if idx < 0 then
-    sl.AddObject(key, TObject(1))
+    sl.AddObject(key, TObject(count))
   else begin
     n := Integer(sl.Objects[idx]);
-    sl.Objects[idx] := TObject(n + 1);
+    sl.Objects[idx] := TObject(n + count);
   end;
+end;
+
+//============================================================================
+procedure RobCoMultisetInc(sl: TStringList; const key: string);
+begin
+  RobCoMultisetAddCount(sl, key, 1);
 end;
 
 //============================================================================
 procedure RobCoMultisetSort(sl: TStringList);
 begin
-  if not Assigned(sl) then
+  // Unsorted lists only: TStringList.Sorted breaks Object pairing in JvInterpreter;
+  // sorting thousands of FLST keys here was O(n^2) and stalled exports.
+end;
+
+//============================================================================
+procedure RobCoMultisetAssign(dst, src: TStringList);
+var
+  i, n: integer;
+begin
+  RobCoMultisetClear(dst);
+  if not Assigned(src) then
     Exit;
-  if sl.Count < 2 then
-    Exit;
-  sl.Sorted := True;
+  // Multiset keys are unique; copy directly instead of RobCoMultisetAddCount (O(n^2)).
+  for i := 0 to Pred(src.Count) do begin
+    n := Integer(src.Objects[i]);
+    if n <= 0 then
+      Continue;
+    dst.AddObject(src[i], TObject(n));
+  end;
 end;
 
 //============================================================================
@@ -317,7 +1207,7 @@ begin
   if key = '' then
     Exit;
 
-  idx := sl.IndexOf(key);
+  idx := RobCoMultisetFindIdxLinear(sl, key);
   if idx < 0 then
     Exit;
 
@@ -339,7 +1229,7 @@ function RobCoMultisetCount(sl: TStringList; const key: string): integer;
 var
   idx: integer;
 begin
-  idx := sl.IndexOf(key);
+  idx := RobCoMultisetFindIdxLinear(sl, key);
   if idx < 0 then
     Result := 0
   else
@@ -406,17 +1296,32 @@ begin
 end;
 
 //============================================================================
+// ITM gate: diff operation field values vs master when Forward ITMs is off.
+// Write all fields (verbose vs sparse lines) is separate: RobCoAppendField and
+// RobCoAppendAuthoringBatchField pad =none for patch-author templates without
+// changing ITM skip or which records are exported.
+function RobCoSnapshotUseItmGate: boolean;
+begin
+  Result := gRobCoSnapItmGateActive;
+end;
+
+//============================================================================
 function RobCoSnapshotOmitUnchangedFields: boolean;
 begin
-  Result := (not gRobCoExportWriteAllFields) and (not gRobCoExportForwardItms);
+  Result := RobCoSnapshotUseItmGate;
 end;
 
 //============================================================================
 function RobCoExportFieldIfChanged(e: IInterface; const pluginValue, masterValue: string): string;
 begin
   Result := pluginValue;
-  if not RobCoSnapshotOmitUnchangedFields then
+  if not RobCoSnapshotUseItmGate then
     Exit;
+  if Assigned(gRobCoSnapMaster) then begin
+    if pluginValue = masterValue then
+      Result := '';
+    Exit;
+  end;
   if not RobCoRecordHasExternalMaster(e) then
     Exit;
   if pluginValue = masterValue then
@@ -430,7 +1335,7 @@ var
   pluginVal, masterVal: string;
 begin
   pluginVal := RobCoReadDataField(e, fieldName);
-  if not RobCoSnapshotOmitUnchangedFields then begin
+  if not RobCoSnapshotUseItmGate then begin
     Result := pluginVal;
     Exit;
   end;
@@ -438,7 +1343,7 @@ begin
     Result := pluginVal;
     Exit;
   end;
-  master := MasterOrSelf(e);
+  master := RobCoCompareBaselineRecord(e);
   masterVal := RobCoReadDataField(master, fieldName);
   if pluginVal = masterVal then
     Result := ''
@@ -453,7 +1358,7 @@ var
   pluginVal, masterVal: string;
 begin
   pluginVal := RobCoReadFullName(e);
-  if not RobCoSnapshotOmitUnchangedFields then begin
+  if not RobCoSnapshotUseItmGate then begin
     Result := pluginVal;
     Exit;
   end;
@@ -461,7 +1366,7 @@ begin
     Result := pluginVal;
     Exit;
   end;
-  master := MasterOrSelf(e);
+  master := RobCoCompareBaselineRecord(e);
   masterVal := RobCoReadFullName(master);
   if pluginVal = masterVal then
     Result := ''
@@ -476,7 +1381,7 @@ var
   pluginVal, masterVal: string;
 begin
   pluginVal := RobCoReadPlainFullName(e);
-  if not RobCoSnapshotOmitUnchangedFields then begin
+  if not RobCoSnapshotUseItmGate then begin
     Result := pluginVal;
     Exit;
   end;
@@ -484,7 +1389,7 @@ begin
     Result := pluginVal;
     Exit;
   end;
-  master := MasterOrSelf(e);
+  master := RobCoCompareBaselineRecord(e);
   masterVal := RobCoReadPlainFullName(master);
   if pluginVal = masterVal then
     Result := ''
@@ -496,7 +1401,7 @@ end;
 function RobCoExportListFieldIfChanged(e: IInterface; const pluginList, masterList: string): string;
 begin
   Result := pluginList;
-  if not RobCoSnapshotOmitUnchangedFields then
+  if not RobCoSnapshotUseItmGate then
     Exit;
   if not RobCoRecordHasExternalMaster(e) then
     Exit;
@@ -505,7 +1410,7 @@ begin
 end;
 
 //============================================================================
-procedure RobCoApplyRefListDiffIfCompact(e: IInterface; const pluginList, masterList: string;
+procedure RobCoApplyRefListDiffIfItmGate(e: IInterface; const pluginList, masterList: string;
   var refsToAdd, refsToRemove: string);
 begin
   if not RobCoRecordHasExternalMaster(e) then begin
@@ -513,7 +1418,7 @@ begin
     refsToRemove := 'none';
     Exit;
   end;
-  if RobCoSnapshotOmitUnchangedFields then
+  if RobCoSnapshotUseItmGate then
     RobCoDiffCommaSeparatedRefs(pluginList, masterList, refsToAdd, refsToRemove)
   else begin
     refsToAdd := RobCoNoneIfEmpty(pluginList);
@@ -522,7 +1427,7 @@ begin
 end;
 
 //============================================================================
-procedure RobCoApplyKeywordDiffIfCompact(e: IInterface; const pluginKeywords: string;
+procedure RobCoApplyKeywordDiffIfItmGate(e: IInterface; const pluginKeywords: string;
   var keywordsToAdd, keywordsToRemove: string);
 var
   master: IInterface;
@@ -530,10 +1435,10 @@ var
 begin
   masterKeywords := '';
   if RobCoRecordHasExternalMaster(e) then begin
-    master := MasterOrSelf(e);
+    master := RobCoCompareBaselineRecord(e);
     masterKeywords := RobCoReadKeywordRefsFromElement(master);
   end;
-  RobCoApplyRefListDiffIfCompact(e, pluginKeywords, masterKeywords,
+  RobCoApplyRefListDiffIfItmGate(e, pluginKeywords, masterKeywords,
     keywordsToAdd, keywordsToRemove);
 end;
 
@@ -588,9 +1493,37 @@ begin
 end;
 
 //============================================================================
+function RobCoAppendNumericField(const line, key, value: string): string;
+begin
+  // RobCo Patcher parses these with stof/stoi; =none crashes at game load.
+  if (value = '') or (value = 'none') then begin
+    Result := line;
+    Exit;
+  end;
+
+  if line <> '' then
+    Result := line + ':'
+  else
+    Result := '';
+
+  Result := Result + key + '=' + value;
+end;
+
+//============================================================================
 function RobCoAppendPatchField(const line, key, value: string): string;
 begin
   Result := RobCoAppendField(line, key, value, True);
+end;
+
+//============================================================================
+function RobCoAppendAuthoringBatchField(const line, key, value: string): string;
+begin
+  // Batch-only article filters: omitted on sparse mirror lines (=none), included
+  // when Write all fields is on so patch authors get a full template.
+  if gRobCoExportWriteAllFields then
+    Result := RobCoAppendPatchField(line, key, value)
+  else
+    Result := line;
 end;
 
 //============================================================================
@@ -602,29 +1535,163 @@ begin
 end;
 
 //============================================================================
+procedure RobCoEnsureKeywordPartsScratch;
+begin
+  if not Assigned(gRobCoKeywordPartsScratch) then
+    gRobCoKeywordPartsScratch := TStringList.Create;
+  gRobCoKeywordPartsScratch.Clear;
+end;
+
+//============================================================================
+procedure RobCoEnsureDiffScratch;
+begin
+  if not Assigned(gRobCoDiffScratchPlugin) then begin
+    gRobCoDiffScratchPlugin := TStringList.Create;
+    gRobCoDiffScratchMaster := TStringList.Create;
+    gRobCoDiffScratchAdd := TStringList.Create;
+    gRobCoDiffScratchRem := TStringList.Create;
+  end;
+  gRobCoDiffScratchPlugin.Clear;
+  gRobCoDiffScratchMaster.Clear;
+  gRobCoDiffScratchAdd.Clear;
+  gRobCoDiffScratchRem.Clear;
+end;
+
+//============================================================================
 function RobCoReadKeywordRefs(kwda: IInterface): string;
 var
   i: integer;
   kw: IInterface;
-  parts: TStringList;
 begin
   Result := '';
   if not Assigned(kwda) then
     Exit;
 
-  parts := TStringList.Create;
-  try
-    for i := 0 to Pred(ElementCount(kwda)) do begin
-      kw := LinksTo(ElementByIndex(kwda, i));
-      if not Assigned(kw) then
-        Continue;
-      if Signature(kw) <> 'KYWD' then
-        Continue;
-      parts.Add(RobCoMasterFormIDRef(kw));
-    end;
-    Result := RobCoJoinParts(parts);
-  finally
-    parts.Free;
+  RobCoEnsureKeywordPartsScratch;
+  for i := 0 to Pred(ElementCount(kwda)) do begin
+    kw := LinksTo(ElementByIndex(kwda, i));
+    if not Assigned(kw) then
+      Continue;
+    if Signature(kw) <> 'KYWD' then
+      Continue;
+    gRobCoKeywordPartsScratch.Add(RobCoMasterFormIDRef(kw));
+  end;
+  Result := RobCoJoinParts(gRobCoKeywordPartsScratch);
+end;
+
+//============================================================================
+function RobCoJoinTwoCommaLists(const leftList, rightList: string): string;
+begin
+  if leftList = '' then begin
+    Result := rightList;
+    Exit;
+  end;
+  if rightList = '' then begin
+    Result := leftList;
+    Exit;
+  end;
+  RobCoEnsureDiffScratch;
+  gRobCoDiffScratchPlugin.Clear;
+  RobCoParseCommaList(gRobCoDiffScratchPlugin, leftList);
+  RobCoParseCommaList(gRobCoDiffScratchPlugin, rightList);
+  Result := RobCoJoinParts(gRobCoDiffScratchPlugin);
+end;
+
+//============================================================================
+// Clears per-record field cache while keeping master + session conflict-probe
+// caches warm across records and snapshot ops.
+procedure RobCoSnapRecordCacheClear;
+begin
+  if Assigned(gRobCoSnapRecordCacheKeys) then begin
+    gRobCoSnapRecordCacheKeys.Free;
+    gRobCoSnapRecordCacheKeys := nil;
+  end;
+  if Assigned(gRobCoSnapRecordCacheVals) then begin
+    gRobCoSnapRecordCacheVals.Free;
+    gRobCoSnapRecordCacheVals := nil;
+  end;
+end;
+
+//============================================================================
+procedure RobCoSnapConflictProbeCacheClear;
+begin
+  if Assigned(gRobCoSnapConflictProbeKeys) then begin
+    gRobCoSnapConflictProbeKeys.Free;
+    gRobCoSnapConflictProbeKeys := nil;
+  end;
+end;
+
+//============================================================================
+procedure RobCoSnapRecordAndProbeCacheClear;
+begin
+  RobCoSnapRecordCacheClear;
+  RobCoSnapConflictProbeCacheClear;
+end;
+
+//============================================================================
+// Diff/dedupe TStringList pools only — safe inside plugin loops while INI writer
+// is active (must not free gRobCoIniDeferredAggregate or session caches).
+procedure RobCoReleaseExportDiffScratch;
+begin
+  if Assigned(gRobCoKeywordPartsScratch) then begin
+    gRobCoKeywordPartsScratch.Free;
+    gRobCoKeywordPartsScratch := nil;
+  end;
+  if Assigned(gRobCoDiffScratchPlugin) then begin
+    gRobCoDiffScratchPlugin.Free;
+    gRobCoDiffScratchPlugin := nil;
+  end;
+  if Assigned(gRobCoDiffScratchMaster) then begin
+    gRobCoDiffScratchMaster.Free;
+    gRobCoDiffScratchMaster := nil;
+  end;
+  if Assigned(gRobCoDiffScratchAdd) then begin
+    gRobCoDiffScratchAdd.Free;
+    gRobCoDiffScratchAdd := nil;
+  end;
+  if Assigned(gRobCoDiffScratchRem) then begin
+    gRobCoDiffScratchRem.Free;
+    gRobCoDiffScratchRem := nil;
+  end;
+  if Assigned(gRobCoIniDedupeSeenScratch) then begin
+    gRobCoIniDedupeSeenScratch.Free;
+    gRobCoIniDedupeSeenScratch := nil;
+  end;
+  if Assigned(gRobCoIniDedupeOutputScratch) then begin
+    gRobCoIniDedupeOutputScratch.Free;
+    gRobCoIniDedupeOutputScratch := nil;
+  end;
+  if Assigned(gRobCoIniMergeScratch) then begin
+    gRobCoIniMergeScratch.Free;
+    gRobCoIniMergeScratch := nil;
+  end;
+end;
+
+//============================================================================
+procedure RobCoReleaseHeavyExportScratch;
+begin
+  RobCoReleaseExportDiffScratch;
+  if Assigned(gRobCoPluginNameByLoadOrder) then begin
+    gRobCoPluginNameByLoadOrder.Free;
+    gRobCoPluginNameByLoadOrder := nil;
+  end;
+  RobCoPluginGroupCacheReset;
+  RobCoSnapRecordAndProbeCacheClear;
+end;
+
+//============================================================================
+procedure RobCoIniWriterEnsureLineBuffer;
+begin
+  if not Assigned(gRobCoIniLineBuffer) then
+    gRobCoIniLineBuffer := TStringList.Create;
+end;
+
+//============================================================================
+procedure RobCoIniWriterReleaseLineBuffer;
+begin
+  if Assigned(gRobCoIniLineBuffer) then begin
+    gRobCoIniLineBuffer.Free;
+    gRobCoIniLineBuffer := nil;
   end;
 end;
 
@@ -638,45 +1705,40 @@ end;
 procedure RobCoDiffCommaSeparatedRefs(const pluginRefs, masterRefs: string;
   var refsToAdd, refsToRemove: string);
 var
-  pluginSl, masterSl, addParts, remParts: TStringList;
   i: integer;
   ref: string;
 begin
   refsToAdd := 'none';
   refsToRemove := 'none';
 
-  pluginSl := TStringList.Create;
-  masterSl := TStringList.Create;
-  addParts := TStringList.Create;
-  remParts := TStringList.Create;
-  try
-    RobCoParseCommaList(pluginSl, pluginRefs);
-    RobCoParseCommaList(masterSl, masterRefs);
+  RobCoEnsureDiffScratch;
+  RobCoParseCommaList(gRobCoDiffScratchPlugin, pluginRefs);
+  RobCoParseCommaList(gRobCoDiffScratchMaster, masterRefs);
+  gRobCoDiffScratchMaster.Sorted := True;
 
-    for i := 0 to Pred(pluginSl.Count) do begin
-      ref := Trim(pluginSl[i]);
-      if ref = '' then
-        Continue;
-      if masterSl.IndexOf(ref) < 0 then
-        addParts.Add(ref);
-    end;
-
-    for i := 0 to Pred(masterSl.Count) do begin
-      ref := Trim(masterSl[i]);
-      if ref = '' then
-        Continue;
-      if pluginSl.IndexOf(ref) < 0 then
-        remParts.Add(ref);
-    end;
-
-    refsToAdd := RobCoNoneIfEmpty(RobCoJoinParts(addParts));
-    refsToRemove := RobCoNoneIfEmpty(RobCoJoinParts(remParts));
-  finally
-    remParts.Free;
-    addParts.Free;
-    masterSl.Free;
-    pluginSl.Free;
+  for i := 0 to Pred(gRobCoDiffScratchPlugin.Count) do begin
+    ref := Trim(gRobCoDiffScratchPlugin[i]);
+    if ref = '' then
+      Continue;
+    if gRobCoDiffScratchMaster.IndexOf(ref) < 0 then
+      gRobCoDiffScratchAdd.Add(ref);
   end;
+
+  gRobCoDiffScratchPlugin.Sorted := True;
+  for i := 0 to Pred(gRobCoDiffScratchMaster.Count) do begin
+    ref := Trim(gRobCoDiffScratchMaster[i]);
+    if ref = '' then
+      Continue;
+    if gRobCoDiffScratchPlugin.IndexOf(ref) < 0 then
+      gRobCoDiffScratchRem.Add(ref);
+  end;
+  gRobCoDiffScratchPlugin.Sorted := False;
+  gRobCoDiffScratchMaster.Sorted := False;
+
+  gRobCoDiffScratchAdd.Sorted := True;
+  gRobCoDiffScratchRem.Sorted := True;
+  refsToAdd := RobCoNoneIfEmpty(RobCoJoinParts(gRobCoDiffScratchAdd));
+  refsToRemove := RobCoNoneIfEmpty(RobCoJoinParts(gRobCoDiffScratchRem));
 end;
 
 //============================================================================
@@ -817,6 +1879,26 @@ begin
 end;
 
 //============================================================================
+// Empty APPR on an override inherits the master list (no attachParent* emission).
+function RobCoEffectiveApprKeywordRefs(e: IInterface): string;
+var
+  appr: string;
+  master: IInterface;
+begin
+  appr := RobCoReadApprKeywordRefs(e);
+  if appr <> '' then begin
+    Result := appr;
+    Exit;
+  end;
+  if RobCoRecordHasExternalMaster(e) then begin
+    master := RobCoCompareBaselineRecord(e);
+    Result := RobCoReadApprKeywordRefs(master);
+    Exit;
+  end;
+  Result := '';
+end;
+
+//============================================================================
 function RobCoReadFullName(e: IInterface): string;
 var
   s: string;
@@ -832,8 +1914,8 @@ end;
 //============================================================================
 function RobCoReadPlainFullName(e: IInterface): string;
 begin
-  // Plain FULL (no tildes) for FO4 OMOD exports per RobCo OMOD schema.
-  Result := GetElementEditValues(e, 'FULL');
+  // RobCo Patcher articles require ~...~ for fullName on all record types including OMOD.
+  Result := RobCoReadFullName(e);
 end;
 
 //============================================================================
@@ -858,6 +1940,18 @@ begin
   Result := RobCoReadFormLinkPath(e, path);
   if Result = '' then
     Result := RobCoReadFormLinkRef(e, sigName);
+end;
+
+//============================================================================
+function RobCoSnapCacheFormLinkRef(e: IInterface; const sigName: string): string;
+var
+  key: string;
+begin
+  key := RobCoSnapRecordCacheKey(e, 'flref:' + sigName);
+  if RobCoSnapRecordCacheLookup(key, Result) then
+    Exit;
+  Result := RobCoReadFormLinkRef(e, sigName);
+  RobCoSnapRecordCachePut(key, Result);
 end;
 
 //============================================================================
@@ -973,23 +2067,22 @@ var
 begin
   Result := False;
   frm := frmFileSelect;
-  try
-    frm.Caption := caption;
-    clb := TCheckListBox(frm.FindComponent('CheckListBox1'));
-    for i := 0 to Pred(FileCount) do begin
-      f := FileByIndex(i);
-      clb.Items.AddObject(GetFileName(f), f);
-      clb.Checked[clb.Items.Count - 1] := not RobCoIsVanillaOrCCPlugin(f);
-    end;
-    if frm.ShowModal <> mrOk then
-      Exit;
-    for i := 0 to Pred(clb.Items.Count) do
-      if clb.Checked[i] then
-        slSelected.AddObject(clb.Items[i], clb.Items.Objects[i]);
-    Result := slSelected.Count > 0;
-  finally
-    frm.Free;
+  frm.Caption := caption;
+  clb := TCheckListBox(frm.FindComponent('CheckListBox1'));
+  for i := 0 to Pred(FileCount) do begin
+    f := FileByIndex(i);
+    clb.Items.AddObject(GetFileName(f), f);
+    clb.Checked[clb.Items.Count - 1] := not RobCoIsVanillaOrCCPlugin(f);
   end;
+  if frm.ShowModal <> mrOk then begin
+    frm.Free;
+    Exit;
+  end;
+  for i := 0 to Pred(clb.Items.Count) do
+    if clb.Checked[i] then
+      slSelected.AddObject(clb.Items[i], clb.Items.Objects[i]);
+  Result := slSelected.Count > 0;
+  frm.Free;
 end;
 
 //============================================================================
@@ -1011,46 +2104,265 @@ var
 begin
   Result := '';
   dlgSave := TSaveDialog.Create(nil);
-  try
-    dlgSave.Options := dlgSave.Options + [ofOverwritePrompt];
-    dlgSave.Filter := 'INI files (*.ini)|*.ini';
-    dlgSave.InitialDir := DataPath;
-    dlgSave.FileName := defaultName;
-    if dlgSave.Execute then
-      Result := dlgSave.FileName;
-  finally
-    dlgSave.Free;
-  end;
+  dlgSave.Options := dlgSave.Options + [ofOverwritePrompt];
+  dlgSave.Filter := 'INI files (*.ini)|*.ini';
+  dlgSave.InitialDir := DataPath;
+  dlgSave.FileName := defaultName;
+  if dlgSave.Execute then
+    Result := dlgSave.FileName;
+  dlgSave.Free;
 end;
 
 //============================================================================
-procedure RobCoIniWriterFlushBuffer;
+function RobCoIniLineIsCombinedSectionHeader(const line: string): boolean;
 var
-  merged: TStringList;
+  trimmed: string;
 begin
+  trimmed := Trim(line);
+  Result := (Length(trimmed) >= 7) and (Copy(trimmed, 1, 7) = '//=====');
+end;
+
+//============================================================================
+function RobCoIniLineIsRecordComment(const line: string): boolean;
+var
+  trimmed: string;
+begin
+  trimmed := Trim(line);
+  Result := (trimmed <> '') and (Copy(trimmed, 1, 2) = '//') and
+    (not RobCoIniLineIsCombinedSectionHeader(trimmed));
+end;
+
+//============================================================================
+function RobCoIniLineIsPatchDataLine(const line: string): boolean;
+begin
+  Result := (Trim(line) <> '') and (Copy(Trim(line), 1, 2) <> '//');
+end;
+
+//============================================================================
+function RobCoNormalizePatchDataLine(const line: string): string;
+var
+  trimmed, head, tail: string;
+  eqPos, i: integer;
+begin
+  trimmed := Trim(line);
+  eqPos := Pos('=', trimmed);
+  if eqPos <= 0 then begin
+    Result := trimmed;
+    Exit;
+  end;
+  head := Copy(trimmed, 1, eqPos);
+  tail := Copy(trimmed, eqPos + 1, MaxInt);
+  i := 1;
+  while (i <= Length(tail)) and (tail[i] = ' ') do
+    Inc(i);
+  if i > 1 then
+    tail := Copy(tail, i, MaxInt);
+  Result := head + tail;
+end;
+
+//============================================================================
+function RobCoIniWriterDedupeCombinedBuffer: integer;
+var
+  output, seen: TStringList;
+  i, removed: integer;
+  line, normalized, pendingComment: string;
+begin
+  Result := 0;
   if not Assigned(gRobCoIniLineBuffer) then
     Exit;
   if gRobCoIniLineBuffer.Count = 0 then
     Exit;
+
+  if not Assigned(gRobCoIniDedupeOutputScratch) then
+    gRobCoIniDedupeOutputScratch := TStringList.Create;
+  gRobCoIniDedupeOutputScratch.Clear;
+  output := gRobCoIniDedupeOutputScratch;
+  if not Assigned(gRobCoIniDedupeSeenScratch) then
+    gRobCoIniDedupeSeenScratch := TStringList.Create;
+  gRobCoIniDedupeSeenScratch.Clear;
+  gRobCoIniDedupeSeenScratch.Sorted := True;
+  gRobCoIniDedupeSeenScratch.Duplicates := dupIgnore;
+  seen := gRobCoIniDedupeSeenScratch;
+  removed := 0;
+  pendingComment := '';
+
+  for i := 0 to Pred(gRobCoIniLineBuffer.Count) do begin
+      line := gRobCoIniLineBuffer[i];
+
+      if RobCoIniLineIsCombinedSectionHeader(line) then begin
+        pendingComment := '';
+        output.Add(line);
+        Continue;
+      end;
+
+      if Trim(line) = '' then begin
+        pendingComment := '';
+        output.Add(line);
+        Continue;
+      end;
+
+      if RobCoIniLineIsRecordComment(line) then begin
+        pendingComment := line;
+        Continue;
+      end;
+
+      if RobCoIniLineIsPatchDataLine(line) then begin
+        normalized := RobCoNormalizePatchDataLine(line);
+        if seen.IndexOf(normalized) >= 0 then begin
+          Inc(removed);
+          Continue;
+        end;
+        seen.Add(normalized);
+        if pendingComment <> '' then begin
+          output.Add(pendingComment);
+          pendingComment := '';
+        end;
+        output.Add(normalized);
+      end else
+        output.Add(line);
+    end;
+
+  gRobCoIniLineBuffer.Clear;
+  gRobCoIniLineBuffer.AddStrings(output);
+  Result := removed;
+end;
+
+//============================================================================
+procedure RobCoIniWriterEnsureDeferredAggregate;
+begin
+  if not Assigned(gRobCoIniDeferredAggregate) then
+    gRobCoIniDeferredAggregate := TStringList.Create;
+end;
+
+//============================================================================
+procedure RobCoIniWriterClearDeferredAggregate;
+begin
+  if Assigned(gRobCoIniDeferredAggregate) then
+    gRobCoIniDeferredAggregate.Clear;
+end;
+
+//============================================================================
+procedure RobCoIniWriterAppendBufferToDeferred;
+var
+  i: integer;
+begin
+  if gRobCoIniLineBuffer.Count = 0 then
+    Exit;
   if gRobCoIniActivePath = '' then
     Exit;
-  try
-    if (not gRobCoIniOverwriteOnFlush) and FileExists(gRobCoIniActivePath) then begin
-      merged := TStringList.Create;
-      try
-        merged.LoadFromFile(gRobCoIniActivePath);
-        merged.AddStrings(gRobCoIniLineBuffer);
-        merged.SaveToFile(gRobCoIniActivePath);
-      finally
-        merged.Free;
-      end;
-    end else
-      gRobCoIniLineBuffer.SaveToFile(gRobCoIniActivePath);
-    gRobCoIniOverwriteOnFlush := False;
-    gRobCoIniLineBuffer.Clear;
-  except
-    AddMessage('Error flushing INI: ' + gRobCoIniActivePath);
+  RobCoIniWriterEnsureDeferredAggregate;
+  gRobCoIniDeferredAggregate.Add(RobCoIniDeferredPathMarker + gRobCoIniActivePath);
+  for i := 0 to Pred(gRobCoIniLineBuffer.Count) do
+    gRobCoIniDeferredAggregate.Add(gRobCoIniLineBuffer[i]);
+  gRobCoIniLineBuffer.Clear;
+  RobCoIniWriterMaybeFlushDeferredAggregate;
+end;
+
+//============================================================================
+procedure RobCoIniWriterMaybeFlushOnLineCount;
+begin
+  if RobCoIniFlushLineCount <= 0 then
+    Exit;
+  if gRobCoIniLineBuffer.Count < RobCoIniFlushLineCount then
+    Exit;
+  RobCoIniWriterFlushBuffer;
+end;
+
+//============================================================================
+procedure RobCoIniWriterMaybeFlushDeferredAggregate;
+begin
+  if RobCoIniDeferAggregateFlushLineCount <= 0 then
+    Exit;
+  if not RobCoIniDeferDiskFlush then
+    Exit;
+  if not Assigned(gRobCoIniDeferredAggregate) then
+    Exit;
+  if gRobCoIniDeferredAggregate.Count < RobCoIniDeferAggregateFlushLineCount then
+    Exit;
+  RobCoIniWriterFlushDeferredAggregateToDisk;
+end;
+
+//============================================================================
+procedure RobCoIniWriterSaveBufferToPath(const path: string; overwriteOnFlush: boolean);
+var
+  removed: integer;
+  savedPath: string;
+  savedOverwrite: boolean;
+begin
+  if gRobCoIniLineBuffer.Count = 0 then
+    Exit;
+  if path = '' then
+    Exit;
+  savedPath := gRobCoIniActivePath;
+  savedOverwrite := gRobCoIniOverwriteOnFlush;
+  gRobCoIniActivePath := path;
+  gRobCoIniOverwriteOnFlush := overwriteOnFlush;
+  if not gRobCoIniPerPlugin then begin
+    removed := RobCoIniWriterDedupeCombinedBuffer;
+    // DEBUG_INJECT_PERFMON_COUNTER count.ini.dedupe.removed removed
+    if removed > 0 then
+      RobCoLogSkippedDuplicate(Format('Skipped %d duplicate patch line(s) in %s',
+        [removed, path]));
   end;
+  // DEBUG_INJECT_PERFMON_COUNTER count.ini.flush 1
+  if (not gRobCoIniOverwriteOnFlush) and FileExists(path) then begin
+    if not Assigned(gRobCoIniMergeScratch) then
+      gRobCoIniMergeScratch := TStringList.Create;
+    gRobCoIniMergeScratch.Clear;
+    gRobCoIniMergeScratch.LoadFromFile(path);
+    gRobCoIniMergeScratch.AddStrings(gRobCoIniLineBuffer);
+    gRobCoIniMergeScratch.SaveToFile(path);
+  end else
+    gRobCoIniLineBuffer.SaveToFile(path);
+  gRobCoIniActivePath := savedPath;
+  gRobCoIniOverwriteOnFlush := savedOverwrite;
+  gRobCoIniLineBuffer.Clear;
+end;
+
+//============================================================================
+procedure RobCoIniWriterFlushDeferredAggregateToDisk;
+var
+  i: integer;
+  line, path, built: string;
+begin
+  if not Assigned(gRobCoIniDeferredAggregate) then
+    Exit;
+  if gRobCoIniDeferredAggregate.Count = 0 then
+    Exit;
+  RobCoIniWriterEnsureLineBuffer;
+  path := '';
+  gRobCoIniLineBuffer.Clear;
+  for i := 0 to Pred(gRobCoIniDeferredAggregate.Count) do begin
+    line := gRobCoIniDeferredAggregate[i];
+    if Pos(RobCoIniDeferredPathMarker, line) = 1 then begin
+      if path <> '' then
+        RobCoIniWriterSaveBufferToPath(path, True);
+      built := Copy(line, Length(RobCoIniDeferredPathMarker) + 1, MaxInt);
+      path := built;
+      gRobCoIniLineBuffer.Clear;
+      Continue;
+    end;
+    gRobCoIniLineBuffer.Add(line);
+  end;
+  if path <> '' then
+    RobCoIniWriterSaveBufferToPath(path, True);
+  gRobCoIniDeferredAggregate.Clear;
+end;
+
+//============================================================================
+procedure RobCoIniWriterFlushBuffer;
+begin
+  RobCoIniWriterEnsureLineBuffer;
+  if gRobCoIniLineBuffer.Count = 0 then
+    Exit;
+  if gRobCoIniActivePath = '' then
+    Exit;
+  if RobCoIniDeferDiskFlush then begin
+    RobCoIniWriterAppendBufferToDeferred;
+    Exit;
+  end;
+  RobCoIniWriterSaveBufferToPath(gRobCoIniActivePath, gRobCoIniOverwriteOnFlush);
+  gRobCoIniOverwriteOnFlush := False;
 end;
 
 //============================================================================
@@ -1072,23 +2384,31 @@ begin
   gRobCoIniOverwriteOnFlush := countAsNewFile;
   if countAsNewFile then begin
     Inc(gRobCoIniFilesCreated);
-    AddMessage('Created INI: ' + path);
+    RobCoQueueExportLog('Created INI: ' + path);
   end;
 end;
 
 //============================================================================
 procedure RobCoIniWriterQueueLine(const line: string);
 begin
-  if not Assigned(gRobCoIniLineBuffer) then
-    Exit;
+  RobCoIniWriterEnsureLineBuffer;
   gRobCoIniLineBuffer.Add(line);
+  RobCoIniWriterMaybeFlushOnLineCount;
 end;
 
 //============================================================================
 procedure RobCoIniWriterShutdown;
 begin
   RobCoIniWriterCloseActiveFile;
+  if RobCoIniDeferDiskFlush then
+    RobCoIniWriterFlushDeferredAggregateToDisk;
+  RobCoIniWriterClearDeferredAggregate;
+  if Assigned(gRobCoIniDeferredAggregate) then begin
+    gRobCoIniDeferredAggregate.Free;
+    gRobCoIniDeferredAggregate := nil;
+  end;
   gRobCoIniWriterActive := False;
+  RobCoIniWriterReleaseLineBuffer;
 end;
 
 //============================================================================
@@ -1101,9 +2421,43 @@ begin
     gRobCoIniPluginsStarted.Sorted := True;
     gRobCoIniPluginsStarted.Duplicates := dupIgnore;
   end;
-  if not Assigned(gRobCoIniLineBuffer) then
-    gRobCoIniLineBuffer := TStringList.Create;
+  RobCoIniWriterEnsureLineBuffer;
   gRobCoIniLineBuffer.Clear;
+end;
+
+//============================================================================
+procedure RobCoIniWriterResetPathCache;
+begin
+  gRobCoIniCachedPerPluginName := '';
+  gRobCoIniCachedPerPluginPath := '';
+  gRobCoIniCachedCombinedPath := '';
+end;
+
+//============================================================================
+function RobCoIniWriterPerPluginPath(const pluginName: string): string;
+begin
+  if gRobCoIniCachedPerPluginName = pluginName then begin
+    // DEBUG_INJECT_PERFMON_COUNTER count.cache.ini.path.hit 1
+    Result := gRobCoIniCachedPerPluginPath;
+    Exit;
+  end;
+  // DEBUG_INJECT_PERFMON_COUNTER count.cache.ini.path.miss 1
+  Result := gRobCoIniOutputDir + pluginName + '.ini';
+  gRobCoIniCachedPerPluginName := pluginName;
+  gRobCoIniCachedPerPluginPath := Result;
+end;
+
+//============================================================================
+function RobCoIniWriterCombinedPath: string;
+begin
+  if gRobCoIniCachedCombinedPath <> '' then begin
+    // DEBUG_INJECT_PERFMON_COUNTER count.cache.ini.path.hit 1
+    Result := gRobCoIniCachedCombinedPath;
+    Exit;
+  end;
+  // DEBUG_INJECT_PERFMON_COUNTER count.cache.ini.path.miss 1
+  Result := gRobCoIniOutputDir + gRobCoIniCombinedFileName;
+  gRobCoIniCachedCombinedPath := Result;
 end;
 
 //============================================================================
@@ -1111,6 +2465,8 @@ procedure RobCoIniWriterBeginOp(const outputDir: string; perPlugin: boolean;
   const combinedFileName: string);
 begin
   RobCoIniWriterCloseActiveFile;
+  RobCoReleaseHeavyExportScratch;
+  RobCoIniWriterEnsureLineBuffer;
   gRobCoIniOutputDir := outputDir;
   gRobCoIniPerPlugin := perPlugin;
   gRobCoIniCombinedFileName := combinedFileName;
@@ -1118,8 +2474,11 @@ begin
   gRobCoIniFilesCreated := 0;
   gRobCoIniCombinedFileStarted := False;
   gRobCoIniNeedCombinedPluginHeader := False;
+  RobCoIniWriterResetPathCache;
+  RobCoPluginGroupCacheReset;
   if Assigned(gRobCoIniPluginsStarted) then
     gRobCoIniPluginsStarted.Clear;
+  RobCoIniWriterClearDeferredAggregate;
 end;
 
 //============================================================================
@@ -1129,7 +2488,7 @@ var
   newFile: boolean;
 begin
   if gRobCoIniPerPlugin then begin
-    path := gRobCoIniOutputDir + pluginName + '.ini';
+    path := RobCoIniWriterPerPluginPath(pluginName);
     if gRobCoIniCurrentPlugin <> pluginName then begin
       RobCoIniWriterFlushBuffer;
       gRobCoIniCurrentPlugin := pluginName;
@@ -1144,7 +2503,7 @@ begin
       gRobCoIniCurrentPlugin := pluginName;
       gRobCoIniNeedCombinedPluginHeader := True;
     end;
-    path := gRobCoIniOutputDir + gRobCoIniCombinedFileName;
+    path := RobCoIniWriterCombinedPath;
     newFile := not gRobCoIniCombinedFileStarted;
     if newFile then
       gRobCoIniCombinedFileStarted := True;
@@ -1193,7 +2552,123 @@ end;
 function RobCoIniWriterEndOp: integer;
 begin
   RobCoIniWriterCloseActiveFile;
+  if RobCoIniDeferDiskFlush then
+    RobCoIniWriterFlushDeferredAggregateToDisk;
+  RobCoReleaseHeavyExportScratch;
+  if Assigned(gRobCoIniLineBuffer) then
+    gRobCoIniLineBuffer.Clear;
   Result := gRobCoIniFilesCreated;
+end;
+
+//============================================================================
+procedure RobCoSnapEnsureMasterCache;
+begin
+  if not Assigned(gRobCoSnapMasterCacheKeys) then
+    gRobCoSnapMasterCacheKeys := TStringList.Create;
+  if not Assigned(gRobCoSnapMasterCacheVals) then begin
+    gRobCoSnapMasterCacheVals := TStringList.Create;
+  end;
+end;
+
+//============================================================================
+procedure RobCoSnapMasterCacheClear;
+begin
+  if Assigned(gRobCoSnapMasterCacheKeys) then begin
+    gRobCoSnapMasterCacheKeys.Free;
+    gRobCoSnapMasterCacheKeys := nil;
+  end;
+  if Assigned(gRobCoSnapMasterCacheVals) then begin
+    gRobCoSnapMasterCacheVals.Free;
+    gRobCoSnapMasterCacheVals := nil;
+  end;
+  RobCoSnapRecordCacheClear;
+end;
+
+//============================================================================
+procedure RobCoSnapEnsureRecordCache;
+begin
+  if not Assigned(gRobCoSnapRecordCacheKeys) then
+    gRobCoSnapRecordCacheKeys := TStringList.Create;
+  if not Assigned(gRobCoSnapRecordCacheVals) then
+    gRobCoSnapRecordCacheVals := TStringList.Create;
+end;
+
+//============================================================================
+function RobCoSnapRecordCacheKey(e: IInterface; const fieldTag: string): string;
+begin
+  // Override identity (FormIDRef), not filter/master identity — multiple plugins
+  // overriding the same master must not share keywords/perks/spells cache rows.
+  Result := FormIDRef(e) + '|' + fieldTag;
+end;
+
+//============================================================================
+function RobCoSnapRecordCacheLookup(const key: string; var cached: string): boolean;
+var
+  idx: integer;
+begin
+  Result := False;
+  cached := '';
+  RobCoSnapEnsureRecordCache;
+  idx := gRobCoSnapRecordCacheKeys.IndexOf(key);
+  if idx < 0 then
+    Exit;
+  if idx >= gRobCoSnapRecordCacheVals.Count then
+    Exit;
+  cached := gRobCoSnapRecordCacheVals[idx];
+  Result := True;
+end;
+
+//============================================================================
+procedure RobCoSnapRecordCachePut(const key, val: string);
+var
+  idx: integer;
+begin
+  RobCoSnapEnsureRecordCache;
+  idx := gRobCoSnapRecordCacheKeys.IndexOf(key);
+  if idx >= 0 then
+    gRobCoSnapRecordCacheVals[idx] := val
+  else begin
+    gRobCoSnapRecordCacheKeys.Add(key);
+    gRobCoSnapRecordCacheVals.Add(val);
+  end;
+end;
+
+//============================================================================
+function RobCoSnapMasterCacheKey(master: IInterface; const fieldTag: string): string;
+begin
+  Result := RobCoMasterFormIDRef(master) + '|' + fieldTag;
+end;
+
+//============================================================================
+function RobCoSnapMasterCacheIndex(const key: string): integer;
+begin
+  RobCoSnapEnsureMasterCache;
+  Result := gRobCoSnapMasterCacheKeys.IndexOf(key);
+end;
+
+//============================================================================
+procedure RobCoSnapMasterCachePut(const key, val: string);
+var
+  idx: integer;
+begin
+  RobCoSnapEnsureMasterCache;
+  idx := gRobCoSnapMasterCacheKeys.IndexOf(key);
+  if idx >= 0 then
+    gRobCoSnapMasterCacheVals[idx] := val
+  else begin
+    gRobCoSnapMasterCacheKeys.Add(key);
+    gRobCoSnapMasterCacheVals.Add(val);
+  end;
+end;
+
+//============================================================================
+function RobCoSnapMasterCacheValueAt(idx: integer): string;
+begin
+  Result := '';
+  if idx < 0 then
+    Exit;
+  RobCoSnapEnsureMasterCache;
+  Result := RobCoStringListItemAt(gRobCoSnapMasterCacheVals, idx);
 end;
 
 end.

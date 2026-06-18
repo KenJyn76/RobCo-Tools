@@ -20,6 +20,7 @@ const
   idxExportOMOD = 11;
 
   RobCoOpCount = 12;
+  RobCoCombinedIniFileName = 'RobCo Tools.ini';
 
 //============================================================================
 function RobCoOperationIsListType(opIndex: integer): boolean;
@@ -136,25 +137,41 @@ end;
 //============================================================================
 function DefaultOutputFileName(opIndex: integer): string;
 begin
-  case opIndex of
-    idxLVLI:
-      if RobCoFO4Game then
-        Result := 'Leveled List Export.ini'
-      else
-        Result := 'LVLI Export.ini';
-    idxCONT: Result := 'CONT Export.ini';
-    idxExportRACE: Result := 'RACE Export.ini';
-    idxExportNPC: Result := 'NPC Export.ini';
-    idxExportFLST: Result := 'FLST Export.ini';
-    idxExportCOBJ: Result := 'COBJ Export.ini';
-    idxExportMISC: Result := 'MISC Export.ini';
-    idxExportALCH: Result := 'ALCH Export.ini';
-    idxExportARMO: Result := 'ARMO Export.ini';
-    idxExportWEAP: Result := 'WEAP Export.ini';
-    idxExportAMMO: Result := 'AMMO Export.ini';
-    idxExportOMOD: Result := 'OMOD Export.ini';
-  else
-    Result := 'RobCo Export.ini';
+  Result := RobCoCombinedIniFileName;
+end;
+
+//============================================================================
+function RobCoExportRunSelectedOps(slSelected: TStringList; const exportBasePath: string;
+  var totalFiles, combinedFiles: integer): boolean;
+var
+  i, op, numFiles: integer;
+  exportRoot: string;
+begin
+  Result := True;
+  totalFiles := 0;
+  combinedFiles := 0;
+  gRobCoSnapItmGateActive := not gRobCoExportForwardItms;
+  exportRoot := RobCoEnsureTrailingBackslash(exportBasePath) + RobCoPatcherFrameworkRoot;
+  gRobCoPatcherRootDirBare := exportRoot;
+  // DEBUG_INJECT_PERFMON_HOOK purge_destination_run_selected_ops
+  for i := 0 to Pred(gRobCoSelectedOps.Count) do begin
+    op := StrToIntDef(gRobCoSelectedOps[i], -1);
+    if op < 0 then
+      Continue;
+    if not RobCoEnsurePatcherOutputDir(exportBasePath, op) then begin
+      Result := False;
+      Exit;
+    end;
+    RobCoProgressSetOp(i + 1, gRobCoSelectedOps.Count, '');
+    RobCoIniWriterBeginOp(gRobCoPatcherOutputDir, gRobCoPerPlugin,
+      DefaultOutputFileName(op));
+    RobCoExportPluginsForOp(slSelected, op);
+    numFiles := RobCoIniWriterEndOp;
+    if gRobCoPerPlugin then begin
+      if numFiles > 0 then
+        totalFiles := totalFiles + numFiles;
+    end else if numFiles > 0 then
+      combinedFiles := combinedFiles + numFiles;
   end;
 end;
 
@@ -206,6 +223,199 @@ begin
     idxExportNPC:
       ExportNPCToRobCo(e, forwardItms, overridesOnly, shortComment);
   end;
+  if op = idxExportRACE then
+    RobCoSnapshotClearNpcPatchOutput
+  else if op = idxExportNPC then
+    RobCoSnapshotClearNpcPatchOutput;
+  RobCoSnapClearFieldScratch;
+end;
+
+//============================================================================
+function RobCoSnapshotCobjGateOverride(e: IInterface; forwardItms, overridesOnly: boolean): boolean;
+begin
+  Result := RobCoShouldProcessOverride(e, forwardItms, overridesOnly);
+end;
+
+//============================================================================
+procedure RobCoSnapshotCobjExportRecord(e: IInterface; forwardItms, overridesOnly,
+  shortComment: boolean);
+begin
+  RobCoExportRecordForOp(e, idxExportCOBJ, forwardItms, overridesOnly, shortComment);
+end;
+
+//============================================================================
+function RobCoSnapshotMiscGateOverride(e: IInterface; forwardItms, overridesOnly: boolean): boolean;
+begin
+  Result := RobCoShouldProcessOverride(e, forwardItms, overridesOnly);
+end;
+
+//============================================================================
+procedure RobCoSnapshotMiscExportRecord(e: IInterface; forwardItms, overridesOnly,
+  shortComment: boolean);
+begin
+  RobCoExportRecordForOp(e, idxExportMISC, forwardItms, overridesOnly, shortComment);
+end;
+
+//============================================================================
+function RobCoSnapshotAlchGateOverride(e: IInterface; forwardItms, overridesOnly: boolean): boolean;
+begin
+  Result := RobCoShouldProcessOverride(e, forwardItms, overridesOnly);
+end;
+
+//============================================================================
+procedure RobCoSnapshotAlchExportRecord(e: IInterface; forwardItms, overridesOnly,
+  shortComment: boolean);
+begin
+  RobCoExportRecordForOp(e, idxExportALCH, forwardItms, overridesOnly, shortComment);
+end;
+
+//============================================================================
+function RobCoSnapshotArmoGateOverride(e: IInterface; forwardItms, overridesOnly: boolean): boolean;
+begin
+  Result := RobCoShouldProcessOverride(e, forwardItms, overridesOnly);
+end;
+
+//============================================================================
+procedure RobCoSnapshotArmoExportRecord(e: IInterface; forwardItms, overridesOnly,
+  shortComment: boolean);
+begin
+  RobCoExportRecordForOp(e, idxExportARMO, forwardItms, overridesOnly, shortComment);
+end;
+
+//============================================================================
+function RobCoSnapshotWeapGateOverride(e: IInterface; forwardItms, overridesOnly: boolean): boolean;
+begin
+  Result := RobCoShouldProcessOverride(e, forwardItms, overridesOnly);
+end;
+
+//============================================================================
+procedure RobCoSnapshotWeapExportRecord(e: IInterface; forwardItms, overridesOnly,
+  shortComment: boolean);
+begin
+  RobCoExportRecordForOp(e, idxExportWEAP, forwardItms, overridesOnly, shortComment);
+end;
+
+//============================================================================
+function RobCoSnapshotAmmoGateOverride(e: IInterface; forwardItms, overridesOnly: boolean): boolean;
+begin
+  Result := RobCoShouldProcessOverride(e, forwardItms, overridesOnly);
+end;
+
+//============================================================================
+procedure RobCoSnapshotAmmoExportRecord(e: IInterface; forwardItms, overridesOnly,
+  shortComment: boolean);
+begin
+  RobCoExportRecordForOp(e, idxExportAMMO, forwardItms, overridesOnly, shortComment);
+end;
+
+//============================================================================
+function RobCoSnapshotOmodGateOverride(e: IInterface; forwardItms, overridesOnly: boolean): boolean;
+begin
+  Result := RobCoShouldProcessOverride(e, forwardItms, overridesOnly);
+end;
+
+//============================================================================
+procedure RobCoSnapshotOmodExportRecord(e: IInterface; forwardItms, overridesOnly,
+  shortComment: boolean);
+begin
+  RobCoExportRecordForOp(e, idxExportOMOD, forwardItms, overridesOnly, shortComment);
+end;
+
+//============================================================================
+function RobCoSnapshotRaceGateOverride(e: IInterface; forwardItms, overridesOnly: boolean): boolean;
+begin
+  Result := RobCoShouldProcessOverride(e, forwardItms, overridesOnly);
+end;
+
+//============================================================================
+procedure RobCoSnapshotRaceExportRecord(e: IInterface; forwardItms, overridesOnly,
+  shortComment: boolean);
+begin
+  RobCoExportRecordForOp(e, idxExportRACE, forwardItms, overridesOnly, shortComment);
+end;
+
+//============================================================================
+function RobCoSnapshotNpcGateOverride(e: IInterface; forwardItms, overridesOnly: boolean): boolean;
+begin
+  Result := RobCoShouldProcessOverride(e, forwardItms, overridesOnly);
+end;
+
+//============================================================================
+procedure RobCoSnapshotNpcExportRecord(e: IInterface; forwardItms, overridesOnly,
+  shortComment: boolean);
+begin
+  RobCoExportRecordForOp(e, idxExportNPC, forwardItms, overridesOnly, shortComment);
+end;
+
+//============================================================================
+procedure RobCoSnapshotGateAndExportRecord(e: IInterface; op: integer;
+  forwardItms, overridesOnly, shortComment: boolean);
+begin
+  case op of
+    idxExportCOBJ: begin
+      if not RobCoSnapshotCobjGateOverride(e, forwardItms, overridesOnly) then begin
+        // DEBUG_INJECT_PERFMON_COUNTER count.snapshot.gate.skip 1
+        Exit;
+      end;
+      RobCoSnapshotCobjExportRecord(e, forwardItms, overridesOnly, shortComment);
+    end;
+    idxExportMISC: begin
+      if not RobCoSnapshotMiscGateOverride(e, forwardItms, overridesOnly) then begin
+        // DEBUG_INJECT_PERFMON_COUNTER count.snapshot.gate.skip 1
+        Exit;
+      end;
+      RobCoSnapshotMiscExportRecord(e, forwardItms, overridesOnly, shortComment);
+    end;
+    idxExportALCH: begin
+      if not RobCoSnapshotAlchGateOverride(e, forwardItms, overridesOnly) then begin
+        // DEBUG_INJECT_PERFMON_COUNTER count.snapshot.gate.skip 1
+        Exit;
+      end;
+      RobCoSnapshotAlchExportRecord(e, forwardItms, overridesOnly, shortComment);
+    end;
+    idxExportARMO: begin
+      if not RobCoSnapshotArmoGateOverride(e, forwardItms, overridesOnly) then begin
+        // DEBUG_INJECT_PERFMON_COUNTER count.snapshot.gate.skip 1
+        Exit;
+      end;
+      RobCoSnapshotArmoExportRecord(e, forwardItms, overridesOnly, shortComment);
+    end;
+    idxExportWEAP: begin
+      if not RobCoSnapshotWeapGateOverride(e, forwardItms, overridesOnly) then begin
+        // DEBUG_INJECT_PERFMON_COUNTER count.snapshot.gate.skip 1
+        Exit;
+      end;
+      RobCoSnapshotWeapExportRecord(e, forwardItms, overridesOnly, shortComment);
+    end;
+    idxExportAMMO: begin
+      if not RobCoSnapshotAmmoGateOverride(e, forwardItms, overridesOnly) then begin
+        // DEBUG_INJECT_PERFMON_COUNTER count.snapshot.gate.skip 1
+        Exit;
+      end;
+      RobCoSnapshotAmmoExportRecord(e, forwardItms, overridesOnly, shortComment);
+    end;
+    idxExportOMOD: begin
+      if not RobCoSnapshotOmodGateOverride(e, forwardItms, overridesOnly) then begin
+        // DEBUG_INJECT_PERFMON_COUNTER count.snapshot.gate.skip 1
+        Exit;
+      end;
+      RobCoSnapshotOmodExportRecord(e, forwardItms, overridesOnly, shortComment);
+    end;
+    idxExportRACE: begin
+      if not RobCoSnapshotRaceGateOverride(e, forwardItms, overridesOnly) then begin
+        // DEBUG_INJECT_PERFMON_COUNTER count.snapshot.gate.skip 1
+        Exit;
+      end;
+      RobCoSnapshotRaceExportRecord(e, forwardItms, overridesOnly, shortComment);
+    end;
+    idxExportNPC: begin
+      if not RobCoSnapshotNpcGateOverride(e, forwardItms, overridesOnly) then begin
+        // DEBUG_INJECT_PERFMON_COUNTER count.snapshot.gate.skip 1
+        Exit;
+      end;
+      RobCoSnapshotNpcExportRecord(e, forwardItms, overridesOnly, shortComment);
+    end;
+  end;
 end;
 
 //============================================================================
@@ -214,11 +424,15 @@ procedure RobCoExportPluginsSnapshot(slSelected: TStringList; op: integer;
 var
   i, j: integer;
   f, grp, e: IInterface;
-  sig: string;
+  sig, pluginName: string;
 begin
   sig := RobCoRecordSigForOp(op);
   if sig = '' then
     Exit;
+  RobCoSnapMasterCacheClear;
+  RobCoSnapClearFieldScratch;
+  RobCoSnapReleaseListScratch;
+  RobCoSnapshotClearNpcPatchOutput;
   if op = idxExportNPC then begin
     RobCoBeginNpcPluginExport;
   end else if op = idxExportRACE then begin
@@ -226,19 +440,111 @@ begin
   end;
   for i := 0 to Pred(slSelected.Count) do begin
     f := ObjectToElement(slSelected.Objects[i]);
+    pluginName := GetFileName(f);
     grp := GroupBySignature(f, sig);
     if not Assigned(grp) then
       Continue;
+    if overridesOnly then begin
+      if not RobCoPluginGroupHasOverridesCachedGrp(f, sig, grp) then
+        Continue;
+    end;
     for j := 0 to Pred(ElementCount(grp)) do begin
       e := ElementByIndex(grp, j);
-      RobCoExportRecordForOp(e, op, forwardItms, overridesOnly, shortComment);
+      if Signature(e) <> sig then
+        Continue;
+      RobCoSnapshotGateAndExportRecord(e, op, forwardItms, overridesOnly, shortComment);
     end;
+    RobCoProgressReportPlugin(pluginName, i);
+    RobCoSnapClearFieldScratch;
+    RobCoSnapReleaseListScratch;
+    RobCoSnapshotClearNpcPatchOutput;
+    RobCoReleaseExportDiffScratch;
   end;
 end;
 
 //============================================================================
-procedure RobCoExportPluginsForOp(slSelected: TStringList; opIndex: integer);
+procedure RobCoExportPluginsCobj(slSelected: TStringList;
+  forwardItms, overridesOnly, shortComment: boolean);
 begin
+  RobCoExportPluginsSnapshot(slSelected, idxExportCOBJ,
+    forwardItms, overridesOnly, shortComment);
+end;
+
+//============================================================================
+procedure RobCoExportPluginsMisc(slSelected: TStringList;
+  forwardItms, overridesOnly, shortComment: boolean);
+begin
+  RobCoExportPluginsSnapshot(slSelected, idxExportMISC,
+    forwardItms, overridesOnly, shortComment);
+end;
+
+//============================================================================
+procedure RobCoExportPluginsAlch(slSelected: TStringList;
+  forwardItms, overridesOnly, shortComment: boolean);
+begin
+  RobCoExportPluginsSnapshot(slSelected, idxExportALCH,
+    forwardItms, overridesOnly, shortComment);
+end;
+
+//============================================================================
+procedure RobCoExportPluginsArmo(slSelected: TStringList;
+  forwardItms, overridesOnly, shortComment: boolean);
+begin
+  RobCoExportPluginsSnapshot(slSelected, idxExportARMO,
+    forwardItms, overridesOnly, shortComment);
+end;
+
+//============================================================================
+procedure RobCoExportPluginsWeap(slSelected: TStringList;
+  forwardItms, overridesOnly, shortComment: boolean);
+begin
+  RobCoExportPluginsSnapshot(slSelected, idxExportWEAP,
+    forwardItms, overridesOnly, shortComment);
+end;
+
+//============================================================================
+procedure RobCoExportPluginsAmmo(slSelected: TStringList;
+  forwardItms, overridesOnly, shortComment: boolean);
+begin
+  RobCoExportPluginsSnapshot(slSelected, idxExportAMMO,
+    forwardItms, overridesOnly, shortComment);
+end;
+
+//============================================================================
+procedure RobCoExportPluginsOmod(slSelected: TStringList;
+  forwardItms, overridesOnly, shortComment: boolean);
+begin
+  RobCoExportPluginsSnapshot(slSelected, idxExportOMOD,
+    forwardItms, overridesOnly, shortComment);
+end;
+
+//============================================================================
+procedure RobCoExportPluginsRace(slSelected: TStringList;
+  forwardItms, overridesOnly, shortComment: boolean);
+begin
+  RobCoExportPluginsSnapshot(slSelected, idxExportRACE,
+    forwardItms, overridesOnly, shortComment);
+end;
+
+//============================================================================
+procedure RobCoExportPluginsNpc(slSelected: TStringList;
+  forwardItms, overridesOnly, shortComment: boolean);
+begin
+  RobCoExportPluginsSnapshot(slSelected, idxExportNPC,
+    forwardItms, overridesOnly, shortComment);
+end;
+
+//============================================================================
+procedure RobCoExportPluginsForOp(slSelected: TStringList; opIndex: integer);
+var
+  opLabel: string;
+begin
+  opLabel := RobCoOpLabelForOp(opIndex);
+  if gRobCoProgressOpTotal > 0 then begin
+    RobCoProgressSetOp(gRobCoProgressOpNum, gRobCoProgressOpTotal, opLabel);
+    RobCoReportProgressOpBoundary('RobCo [' + IntToStr(gRobCoProgressOpNum) + '/' +
+      IntToStr(gRobCoProgressOpTotal) + '] Started ' + opLabel);
+  end;
   case opIndex of
     idxLVLI:
       if RobCoFO4Game then
@@ -246,22 +552,48 @@ begin
           gRobCoListExportAdd, gRobCoListExportRemove,
           gRobCoExportForwardItms, gRobCoOverridesOnly, gRobCoPerPlugin)
       else
-        RobCoExportPluginsList(slSelected, RobCoListKindLVLI,
+        RobCoExportPluginsLvli(slSelected,
           gRobCoListExportAdd, gRobCoListExportRemove,
           gRobCoExportForwardItms, gRobCoOverridesOnly, gRobCoPerPlugin);
     idxCONT:
-      RobCoExportPluginsList(slSelected, RobCoListKindCONT,
+      RobCoExportPluginsCont(slSelected,
         gRobCoListExportAdd, gRobCoListExportRemove,
         gRobCoExportForwardItms, gRobCoOverridesOnly, gRobCoPerPlugin);
     idxExportFLST:
-      RobCoExportPluginsList(slSelected, RobCoListKindFLST,
+      RobCoExportPluginsFlst(slSelected,
         gRobCoListExportAdd, gRobCoListExportRemove,
         gRobCoExportForwardItms, gRobCoOverridesOnly, gRobCoPerPlugin);
-    idxExportCOBJ, idxExportMISC, idxExportALCH, idxExportARMO, idxExportWEAP,
-    idxExportAMMO, idxExportOMOD, idxExportRACE, idxExportNPC:
-      RobCoExportPluginsSnapshot(slSelected, opIndex,
+    idxExportCOBJ:
+      RobCoExportPluginsCobj(slSelected,
+        gRobCoExportForwardItms, gRobCoOverridesOnly, gRobCoPerPlugin);
+    idxExportMISC:
+      RobCoExportPluginsMisc(slSelected,
+        gRobCoExportForwardItms, gRobCoOverridesOnly, gRobCoPerPlugin);
+    idxExportALCH:
+      RobCoExportPluginsAlch(slSelected,
+        gRobCoExportForwardItms, gRobCoOverridesOnly, gRobCoPerPlugin);
+    idxExportARMO:
+      RobCoExportPluginsArmo(slSelected,
+        gRobCoExportForwardItms, gRobCoOverridesOnly, gRobCoPerPlugin);
+    idxExportWEAP:
+      RobCoExportPluginsWeap(slSelected,
+        gRobCoExportForwardItms, gRobCoOverridesOnly, gRobCoPerPlugin);
+    idxExportAMMO:
+      RobCoExportPluginsAmmo(slSelected,
+        gRobCoExportForwardItms, gRobCoOverridesOnly, gRobCoPerPlugin);
+    idxExportOMOD:
+      RobCoExportPluginsOmod(slSelected,
+        gRobCoExportForwardItms, gRobCoOverridesOnly, gRobCoPerPlugin);
+    idxExportRACE:
+      RobCoExportPluginsRace(slSelected,
+        gRobCoExportForwardItms, gRobCoOverridesOnly, gRobCoPerPlugin);
+    idxExportNPC:
+      RobCoExportPluginsNpc(slSelected,
         gRobCoExportForwardItms, gRobCoOverridesOnly, gRobCoPerPlugin);
   end;
+  if gRobCoProgressOpTotal > 0 then
+    RobCoReportProgressOpBoundary('RobCo [' + IntToStr(gRobCoProgressOpNum) + '/' +
+      IntToStr(gRobCoProgressOpTotal) + '] Stopped ' + opLabel);
 end;
 
 end.
