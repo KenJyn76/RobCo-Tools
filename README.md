@@ -4,8 +4,6 @@ A set of experimental xEdit Scripts that generate RobCo Patcher ini files from e
 
 -----------------------------------------------------------------------------------------------------------
 
-The only tools in this collection I can personally confirm work are the List-based scripts, as they are the only ones I have used in my load order. These are at the top of the list. 
-
 Load xEdit > Apply Script... > RobCo Tools
 
 A dialog box will pop up and guide you through the process. The script will extract all data in the loaded plugins and generate RobCo Patcher ini files that you can then use as a template to add/remove what you want. The script will remove items that are removed from the LVLI record, and add items that are added. Optionally, the script can carry forward LVLOs that are identical to master.
